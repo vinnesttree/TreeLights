@@ -56,9 +56,12 @@ def pixel_ray(uv: np.ndarray, R: np.ndarray, t: np.ndarray, K: Intrinsics) -> tu
 
 
 def refine_point(X0: np.ndarray, obs_uv: np.ndarray, Rs: list[np.ndarray], ts: list[np.ndarray], Ks: list[Intrinsics],
-                 loss: str = "linear") -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+                 loss: str = "linear", obs_sigma: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Nonlinear triangulation of one point with fixed cameras.
-    Returns (X, per-observation reprojection error px, 3x3 covariance for 1 px noise)."""
+    obs_sigma: per-observation pixel uncertainty (>= 1; default 1). Diffuse observations
+    (light scattered by branches) get a larger value and so less weight.
+    Returns (X, per-observation reprojection error px, 3x3 covariance)."""
+    w = 1.0 / np.repeat(np.ones(len(Rs)) if obs_sigma is None else np.maximum(np.asarray(obs_sigma, float), 1.0), 2)
     Rm = np.stack(Rs)
     tm = np.stack(ts)
     f = np.array([k.f for k in Ks])
@@ -74,10 +77,10 @@ def refine_point(X0: np.ndarray, obs_uv: np.ndarray, Rs: list[np.ndarray], ts: l
         r2 = x * x + y * y
         d = 1 + k1 * r2 + k2 * r2 * r2
         uv = np.stack([f * x * d + cx, f * y * d + cy], axis=1)
-        return (uv - obs_uv).ravel()
+        return (uv - obs_uv).ravel() * w
 
     sol = least_squares(res, X0, loss=loss, f_scale=2.0, method="lm" if loss == "linear" else "trf", max_nfev=50)
-    r = res(sol.x).reshape(-1, 2)
+    r = (res(sol.x) / w).reshape(-1, 2)
     J = sol.jac
     try:
         cov = np.linalg.inv(J.T @ J)

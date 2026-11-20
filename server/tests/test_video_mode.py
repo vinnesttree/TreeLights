@@ -10,8 +10,7 @@ from treelights.sim.tree import make_tree
 
 def check_identities(scan, scene, view):
     obs = scan.observations()
-    uv, _ = scene.project_view(view)
-    true = uv + view.glow_offset
+    true = scene.apparent_uv(view)
     seen = np.nonzero(view.vis > 0)[0]
     wrong, right = [], 0
     for seg, leds in obs.items():
@@ -19,10 +18,12 @@ def check_identities(scan, scene, view):
             if not c:
                 continue
             d = np.hypot(true[seen, 0] - c[0]["x"], true[seen, 1] - c[0]["y"])
-            if view.vis[led] > 0 and np.hypot(*(true[led] - [c[0]["x"], c[0]["y"]])) <= 2.5:
+            d_own = np.hypot(*(true[led] - [c[0]["x"], c[0]["y"]]))
+            if view.vis[led] > 0 and d_own <= 2.5:
                 right += 1
-            else:
-                wrong.append((led, int(seen[np.argmin(d)])))
+            elif d_own > 45 or (seen[np.argmin(d)] != led and d.min() <= 1.5):
+                wrong.append((led, int(seen[np.argmin(d)])))  # another LED, or far away
+            # else: a reflection of this LED off nearby branches
     return right, wrong
 
 

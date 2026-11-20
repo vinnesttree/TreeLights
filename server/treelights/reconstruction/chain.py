@@ -51,8 +51,18 @@ def learn_bounds(n: int, pos: dict[int, np.ndarray], sigma: dict[int, float], tr
     notes = []
     fallback = len(d_tr) < MIN_TRUSTED_LINKS
     if fallback:
-        base_raw = FALLBACK_FRACTION * height
-        notes.append(f"Only {len(d_tr)} trusted links; using a wide fallback bound.")
+        # Too few trusted links: estimate from every consecutive pair of current positions
+        # (less reliable, so a bigger margin). A fixed share of the tree height is the last
+        # resort; it depends on how densely the tree is wired.
+        d_all = np.array([float(np.linalg.norm(pos[i + 1] - pos[i])) for i in range(n - 1)
+                          if i in pos and i + 1 in pos and i not in known_break])
+        if len(d_all) >= 10:
+            med = np.median(d_all)
+            mad = 1.4826 * np.median(np.abs(d_all - med))
+            base_raw = float(np.percentile(d_all[d_all <= med + 6 * max(mad, 0.02 * med)], 95)) * 1.25
+        else:
+            base_raw = FALLBACK_FRACTION * height
+        notes.append(f"Only {len(d_tr)} trusted links; using a wider bound estimated from all positions.")
     else:
         d = np.array(list(d_tr.values()))
         med = np.median(d)

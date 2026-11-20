@@ -91,7 +91,7 @@ This section lists what would go wrong if draft 1 were built as written, and wha
 | # | What goes wrong | Effect in draft 1 | Change |
 |---|---|---|---|
 | F15 | Reflections in a mirror, window or TV screen agree across views: they triangulate like a real LED behind the glass. | Draft 1 relied on multi-view agreement to reject reflections. | A prior on the tree's volume, the chain bound, and the number of supporting views (§9.5). |
-| F16 | Light shining through needles is a diffuse glow, with its center shifted off the LED. | Positions are biased. | The centroid is taken from the bright core only, and sharp observations get more weight (§8.1). |
+| F16 | Light shining through needles is a diffuse glow, with its center shifted off the LED. Branches around an LED scatter its light and glint, and a glint can outshine a mostly hidden LED. | Positions are biased, and a glint or lit branch could be taken for the LED. | Core-only centroid above the local background. Blobs classified as point or diffuse, each with its own uncertainty. Dim reflections next to a brighter LED are dropped. Multi-view fitting weights by uncertainty, so view-dependent glints don't triangulate (§8.1, §9.5). |
 | F17 | The phone's focal length is unknown, and draft 1 started from one guess. | Reconstruction fails, or settles on a distorted solution. | Multiple starts over several field-of-view guesses. Optional one-time camera calibration with a board shown on any screen (§9.2). |
 | F18 | Depth reversal (an "inside-out" tree), or a wrong "up" axis. This is especially likely when views come from one side. | A wrong map that still has good error numbers. | Check that each camera mostly sees LEDs on its own side of the tree. "Up" is decided by agreement of four independent estimates (§9.3, §9.4). |
 | F19 | Errors cluster in contiguous index ranges, for example from drift near the end of a view. Draft 1 left the capture order optional. | The chain bound is weakest exactly where errors pile up. | Each view captures LEDs in a shuffled order (§7.4). |
@@ -463,11 +463,17 @@ The quick reconstruction also predicts which LEDs face the next view, which focu
 3. **Expected color.** Project the difference onto the expected color learned in the color check. The off-color part is kept for verification.
 4. **Peak finding.** Find local maxima with a minimum separation, rather than plain connected regions, so an LED and a nearby reflection stay separate.
 5. **Core-only centroid.** Compute the sub-pixel centroid from pixels above 50% of the peak, in a small window. Glow through needles is lopsided; using only the core stops it from pulling the position.
-6. **Candidates.**
-   - Each peak is measured for SNR, sharpness (peak relative to area), saturation and color match.
-   - Up to 3 candidates are kept per frame, each with a score.
-   - Diffuse or very large blobs score low.
-7. **Frame sanity.** Outside the candidate regions, the difference must look like noise. A large changed region (person walking past, light switched on, exposure jump) invalidates the frame. That triggers a new dark reference and a recapture.
+6. **Candidates and branches.** Only one LED is lit, so every other blob is light from that LED reaching the camera another way.
+   - **Measurements per peak:** SNR, sharpness, saturation and color match. Sharpness is the core's area above half its height over the *local background*, because a visible LED core often sits on a pedestal of light scattered by the branches around it.
+   - **Point or diffuse.** Each blob is classified as a **point** source (the LED itself, or a needle glint) or **diffuse** (light scattered by branches, often all that's seen of an LED hidden behind needles).
+     - Diffuse blobs carry a localization uncertainty about the size of the glow.
+     - Point blobs carry a fraction of a pixel.
+   - **Ranking.** Blobs are ranked by brightness, with diffuse blobs down-weighted. A bright LED beats a sharper but dimmer glint; an earlier capped-SNR score let glints win.
+   - **Reflections dropped.** A point blob within 40 px of a point blob more than about 3× brighter is a reflection of it off nearby branches, and is dropped.
+   - **Kept.** Up to 3 candidates per frame. A glint brighter than a mostly hidden LED is kept *alongside* it, because one frame can't tell them apart. Glints are specular, so they move between views and the multi-view stage rejects them.
+7. **Frame sanity.** Outside the candidate regions, the difference must look like noise.
+   - A candidate's whole connected glow region (lit branches) is excluded, as long as it's smaller than about 0.2% of the image.
+   - A larger changed region (person walking past, light switched on, exposure jump) invalidates the frame. That triggers a new dark reference and a recapture.
 8. **Output.** For each (segment, LED) pair, the detector reports its candidates, or "not seen in a valid frame". The second is negative information, used when filling gaps (§9.9).
 
 ### 8.2 Binary-coded frames
@@ -482,7 +488,10 @@ The quick reconstruction also predicts which LEDs face the next view, which focu
 - **Registration.** Each frame's peaks are matched to the nearest reference peaks, and the median displacement is the shift. A shift over 3 px, or fewer than 70% of peaks matching, means a recapture. This also tolerates small hand shake. Phase correlation was tried first, but it sometimes locked onto a wrong offset with these sparse, repetitive point patterns.
 - **Bit reliability.** For each peak and bit: reliability = |pattern − complement| / (pattern + complement). Any unreliable bit rejects that peak. Two LEDs merged into one peak give unreliable bits, so they're rejected this way.
 - **Pair consistency.** In each pattern/complement pair, most peaks must be lit in exactly one of the two frames. Otherwise the pair was stale or caught mid-change (rolling shutter), and it is recaptured.
-- **Candidates.** A peak that decodes to index *i* becomes a candidate for LED *i*. A reflection decodes to the same index and simply becomes another candidate.
+- **Candidates.** A peak that decodes to index *i* becomes a candidate for LED *i*. Reflections off nearby branches blink with their LED, so they decode to the same index and become further candidates.
+  - Each is classified point or diffuse, as in §8.1, measured in the all-on image above its local background.
+  - An LED counts as decoded only if a point blob decoded to it. LEDs seen only as scattered light get a clean one-LED frame in the sequential pass.
+  - When an LED has both, the one-LED frame takes precedence over its binary blobs.
 
 ## 9. Reconstruction
 
@@ -519,7 +528,7 @@ Random seeds are fixed, so the same scan always produces the same map.
 4. **Multiple starts:** focal-length guesses × the top 3 seed pairs. Keep the solution with the lowest robust error per observation and the most registered segments.
 5. **Checks:**
    - **In front:** every point must be in front of the cameras that see it.
-   - **Visibility side:** each camera should mostly see LEDs on its own side of the tree. A depth-reversed ("inside-out") solution fails this.
+   - **Visibility side:** each camera should mostly see LEDs on its own side of the tree. A depth-reversed ("inside-out") solution fails this. LEDs glimpsed through the branches from the far side lower the true share, so the threshold is "clearly above one half": a reversed map scores about one minus the true share.
    - If a check fails, the next-best start is tried. If all of them fail, the report says so.
 
 ### 9.4 World orientation
@@ -544,6 +553,7 @@ Both are provisional at this stage and finalised in §9.10.
 2. Collect inliers: at most one candidate per segment, reprojection error under about 3 px, and in front of the camera.
 3. Refine each hypothesis, and merge duplicates.
 4. Keep up to 5. Each records its position, supporting segments, reprojection error, triangulation angle and uncertainty.
+   - Each candidate carries its kind (point source or diffuse) and its pixel uncertainty. A diffuse blob (light scattered by branches) is an inlier at a distance proportional to its size, and it is down-weighted in the fit.
    - The triangulation angle counts as min(a, 180° − a). Rays from exactly opposite sides of the tree are nearly collinear, so they fix depth as poorly as nearly parallel rays.
    - A hypothesis's cost includes its uncertainty.
 

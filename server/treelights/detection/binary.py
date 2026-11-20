@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 from scipy.spatial import cKDTree
 
-from .detector import Reference, find_peaks, robust_sigma
+from .detector import Reference, find_peaks, measure_peak, robust_sigma
 
 N_BITS = 16
 DATA_BITS = 11
@@ -193,6 +193,10 @@ class BinaryDecoder:
             idx = value_to_index(v)
             if idx >= self.n_leds:
                 continue
-            out.append({"index": int(idx), "x": float(self.peaks[k, 0]), "y": float(self.peaks[k, 1]),
-                        "reliability": float(rel[k].min()), "snr": float(self.peak_snr[k])})
+            # Point source or light scattered by branches? (Reflections off branches blink
+            # with their LED and decode to the same index.)
+            m = measure_peak(self.allon, None, None, int(self.peaks[k, 0]), int(self.peaks[k, 1]), self.sigma)
+            out.append({"index": int(idx), "x": float(m.x), "y": float(m.y), "peak": float(m.peak),
+                        "reliability": float(rel[k].min()), "snr": float(self.peak_snr[k]),
+                        "kind": m.kind, "sigma_px": m.sigma_px, "sharpness": m.sharpness})
         return out

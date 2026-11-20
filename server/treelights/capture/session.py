@@ -326,11 +326,17 @@ class CaptureSession:
             await self._color_check()
             remaining = self._remaining(vid)
             decoded: set[int] = set()
+            diffuse_only: set[int] = set()
             if mode == "hybrid":
-                decoded = self._captured_in_view(vid, kinds=("binary",))
-                if not decoded:
-                    decoded = await self._with_movement(vid, self._binary_pass, vid)
+                if not self._captured_in_view(vid, kinds=("binary",)):
+                    await self._with_movement(vid, self._binary_pass, vid)
+                decoded, diffuse_only = self._binary_split(vid)
             queue = self._sequential_queue(vid, remaining, decoded, mode)
+            # LEDs the binary pass only saw as light scattered by branches get a clean
+            # one-LED frame too: the LED itself may be visible there.
+            extra = np.array(sorted(i for i in diffuse_only if i not in queue), int)
+            self.rng.shuffle(extra)  # scattered order, like the rest of the queue (§7.4)
+            queue += extra.tolist()
             await self._with_movement(vid, self._sequential_pass, vid, queue, "seq")
             await self._with_movement(vid, self._retry_pass, vid)
             await self._with_movement(vid, self._final_check)
@@ -584,8 +590,13 @@ class CaptureSession:
         for r in results:
             by_led.setdefault(r["index"], []).append(r)
         for led, rs in by_led.items():
-            cands = [{"x": r["x"], "y": r["y"], "score": float(min(1.0, r["snr"] / 40) * r["reliability"]),
-                      "snr": r["snr"], "reliability": r["reliability"]} for r in rs]
+            # Several blobs can decode to one LED (its reflections off branches blink with it):
+            # rank them like single-LED frames, by brightness with diffuse blobs down-weighted.
+            strength = [r["peak"] * (1.0 if r["kind"] == "point" else 0.4) * r["reliability"] for r in rs]
+            top = max(strength) or 1.0
+            cands = [{"x": r["x"], "y": r["y"], "score": float(st / top), "snr": r["snr"], "reliability": r["reliability"],
+                      "kind": r["kind"], "sigma_px": r["sigma_px"]} for r, st in zip(rs, strength)]
+            cands.sort(key=lambda c: -c["score"])
             self.scan.record({"segment": seg.id, "view": vid, "led": led, "kind": "binary", "step": step, "candidates": cands})
         # Spot-check: a few decoded LEDs lit one at a time must appear where they were decoded.
         good = [led for led, rs in by_led.items() if len(rs) == 1 and rs[0]["reliability"] >= 0.5]
@@ -595,9 +606,10 @@ class CaptureSession:
         for led in sample:
             res = await self._capture_led(vid, int(led), kind="spot")
             if res and res["candidates"]:
-                c = res["candidates"][0]
+                # Any blob of the single-LED frame may match: a glint off a nearby branch can
+                # outshine a partly hidden LED. A wrong decode leaves nothing at that position.
                 d = by_led[int(led)][0]
-                if np.hypot(c["x"] - d["x"], c["y"] - d["y"]) > 2.5:
+                if not any(np.hypot(c["x"] - d["x"], c["y"] - d["y"]) <= 2.5 for c in res["candidates"]):
                     mismatches += 1
         if mismatches:
             self._warn("Binary results failed the spot-check; capturing this view one LED at a time.")
@@ -733,6 +745,18 @@ class CaptureSession:
         seg.ref_path = ref_path
         if await self._constellation_moved():
             raise Moved()
+
+    def _binary_split(self, vid: str) -> tuple[set[int], set[int]]:
+        """LEDs decoded by the binary pass with at least one point-source blob, and LEDs
+        decoded only through diffuse blobs (light scattered by branches)."""
+        segs = set(self.scan.view(vid)["segments"])
+        point: set[int] = set()
+        any_: set[int] = set()
+        for r in self.scan.valid_records(segs, ("binary",)):
+            any_.add(int(r["led"]))
+            if any(c.get("kind", "point") == "point" for c in r.get("candidates", [])):
+                point.add(int(r["led"]))
+        return point, any_ - point
 
     def _captured_in_view(self, vid: str, kinds: tuple[str, ...]) -> set[int]:
         segs = set(self.scan.view(vid)["segments"])

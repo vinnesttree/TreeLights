@@ -91,18 +91,23 @@ def _intr_for(width: int, height: int):
     return Intrinsics(f, (width - 1) / 2, (height - 1) / 2, -0.04, 0.0)
 
 
+REFLECTION_PX = 45.0
+
+
 def identity_errors(sim: Sim, tol_px: float = 2.5) -> dict:
-    """Compare recorded best candidates with ground truth: how many observations
-    point at a different LED than the one they're recorded for."""
+    """Compare recorded best candidates with ground truth.
+
+    right: at the LED's own core. reflection: near the LED (a glint or lit branch around
+    it), which the multi-view stage rejects. wrong (an identity error): on another LED's
+    core, or far from the LED."""
     obs = sim.scan.observations()
     seg_view = {s: m["view"] for s, m in sim.scan.meta["segments"].items()}
     view_ids = [v["id"] for v in sim.scan.meta["views"]]
-    wrong, right, total = [], 0, 0
+    wrong, right, total, reflection = [], 0, 0, 0
     for seg, leds in obs.items():
         vi = view_ids.index(seg_view[seg])
         v = sim.scene.views[vi]
-        uv, _ = sim.scene.project_view(v)
-        true = uv + v.glow_offset
+        true = sim.scene.apparent_uv(v)
         seen = np.nonzero(v.vis > 0)[0]
         for led, cands in leds.items():
             if not cands:
@@ -115,6 +120,10 @@ def identity_errors(sim: Sim, tol_px: float = 2.5) -> dict:
                 continue
             dists = np.hypot(true[seen, 0] - c["x"], true[seen, 1] - c["y"])
             nearest = int(seen[np.argmin(dists)]) if len(seen) else -1
+            on_other = len(seen) and nearest != led and dists.min() <= 1.5
+            if d_true <= REFLECTION_PX and not on_other:
+                reflection += 1
+                continue
             wrong.append({"seg": seg, "led": int(led), "nearest": nearest, "d_true": float(d_true),
                           "d_nearest": float(dists.min()) if len(seen) else None, "visible": bool(v.vis[led] > 0)})
-    return {"total": total, "right": right, "wrong": wrong}
+    return {"total": total, "right": right, "reflection": reflection, "wrong": wrong}

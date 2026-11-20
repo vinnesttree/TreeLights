@@ -22,9 +22,11 @@ class Hypothesis:
     uv: list[np.ndarray]
     err_px: float
     angle_deg: float
-    sigma: float  # position uncertainty (world units, 1 px noise)
+    sigma: float  # position uncertainty (world units)
     score: float  # mean candidate score
     cost: float = 0.0
+    nerr: float = 0.0  # mean reprojection error relative to each observation's uncertainty
+    diffuse: float = 0.0  # share of supporting observations that were diffuse (scattered light)
 
     @property
     def n(self) -> int:
@@ -47,21 +49,22 @@ def build_hypotheses(obs: dict[str, dict[int, list[dict]]], cams: Cameras, n_led
     scene = np.ptp(np.array([cams.center(s) for s in cams.poses]), axis=0).max() or 1.0
     merge = 0.004 * scene
     for led in range(n_leds):
-        entries = []  # (seg, uv, score)
+        entries = []  # (seg, uv, score, sigma_px, diffuse)
         for s in cams.poses:
             for c in obs.get(s, {}).get(led, []) or []:
-                entries.append((s, np.array([c["x"], c["y"]], float), float(c.get("score", 0.5))))
+                entries.append((s, np.array([c["x"], c["y"]], float), float(c.get("score", 0.5)),
+                                max(1.0, float(c.get("sigma_px", 1.0))), c.get("kind", "point") == "diffuse"))
         if len({e[0] for e in entries}) < 2:
             continue
         entries.sort(key=lambda e: -e[2])
-        by_seg: dict[str, list[tuple[np.ndarray, float]]] = {}
-        for s, uv, sc in entries:
-            by_seg.setdefault(s, []).append((uv, sc))
+        by_seg: dict[str, list[tuple]] = {}
+        for s, uv, sc, sg, df in entries:
+            by_seg.setdefault(s, []).append((uv, sc, sg, df))
         pairs = [(a, b) for ai, a in enumerate(entries) for b in entries[ai + 1 :] if a[0] != b[0]][:MAX_PAIRS]
         hyps: list[Hypothesis] = []
         for a, b in pairs:
             Cs, ds = [], []
-            for s, uv, _ in (a, b):
+            for s, uv, *_ in (a, b):
                 R, t = cams.poses[s]
                 nrm = undistort_normalized(uv[None], Ks[s])[0]
                 d = R.T @ np.array([nrm[0], nrm[1], 1.0])
@@ -74,26 +77,31 @@ def build_hypotheses(obs: dict[str, dict[int, list[dict]]], cams: Cameras, n_led
             inl = _inliers(X, by_seg, cams, Ks)
             if len(inl) < 2:
                 continue
-            segs = [s for s, _, _ in inl]
-            uvs = [uv for _, uv, _ in inl]
-            X, errs, cov = refine_point(X, np.array(uvs), [cams.poses[s][0] for s in segs], [cams.poses[s][1] for s in segs], [Ks[s] for s in segs])
+            segs = [e[0] for e in inl]
+            uvs = [e[1] for e in inl]
+            sgs = [e[3] for e in inl]
+            X, errs, cov = refine_point(X, np.array(uvs), [cams.poses[s][0] for s in segs], [cams.poses[s][1] for s in segs],
+                                        [Ks[s] for s in segs], obs_sigma=np.array(sgs))
             inl = _inliers(X, by_seg, cams, Ks)
             if len(inl) < 2:
                 continue
-            segs = [s for s, _, _ in inl]
+            segs = [e[0] for e in inl]
             if any(np.linalg.norm(h.X - X) < merge and set(h.segs) == set(segs) for h in hyps):
                 continue
-            uvs = [uv for _, uv, _ in inl]
-            X, errs, cov = refine_point(X, np.array(uvs), [cams.poses[s][0] for s in segs], [cams.poses[s][1] for s in segs], [Ks[s] for s in segs])
+            uvs = [e[1] for e in inl]
+            sgs = np.array([e[3] for e in inl])
+            X, errs, cov = refine_point(X, np.array(uvs), [cams.poses[s][0] for s in segs], [cams.poses[s][1] for s in segs],
+                                        [Ks[s] for s in segs], obs_sigma=sgs)
             centers = np.array([cams.center(s) for s in segs])
             dirs = (centers - X) / np.linalg.norm(centers - X, axis=1, keepdims=True)
             # Triangulation strength: rays from opposite sides (near 180 deg) are as weak as near-parallel ones.
             ang = max(_eff_angle(dirs[i], dirs[j]) for i in range(len(dirs)) for j in range(i + 1, len(dirs)))
             sigma = float(np.sqrt(max(np.linalg.eigvalsh(cov).max(), 0.0)))
-            hyps.append(Hypothesis(X, segs, uvs, float(np.mean(errs)), ang, sigma, float(np.mean([sc for _, _, sc in inl]))))
+            hyps.append(Hypothesis(X, segs, uvs, float(np.mean(errs)), ang, sigma, float(np.mean([e[2] for e in inl])),
+                                   nerr=float(np.mean(errs / sgs)), diffuse=float(np.mean([e[4] for e in inl]))))
         if hyps:
             # Collapse near-duplicates (same point reached from different pairs).
-            hyps.sort(key=lambda h: (-h.n, h.err_px))
+            hyps.sort(key=lambda h: (-h.n, h.diffuse, h.nerr))
             uniq: list[Hypothesis] = []
             for h in hyps:
                 if not any(np.linalg.norm(h.X - u.X) < merge for u in uniq):
@@ -107,16 +115,19 @@ def _eff_angle(a: np.ndarray, b: np.ndarray) -> float:
     return min(d, 180.0 - d)
 
 
-def _inliers(X: np.ndarray, by_seg: dict, cams: Cameras, Ks: dict) -> list[tuple[str, np.ndarray, float]]:
+def _inliers(X: np.ndarray, by_seg: dict, cams: Cameras, Ks: dict) -> list[tuple]:
+    """Per segment, the candidate that fits X best relative to its own uncertainty, if it
+    fits: (seg, uv, score, sigma_px, diffuse). A diffuse blob may be further from the
+    projection than a point source, in proportion to its size."""
     out = []
     for s, cands in by_seg.items():
         R, t = cams.poses[s]
         p, z = _project(X, R, t, Ks[s])
         if z <= 0:
             continue
-        best = min(cands, key=lambda c: np.hypot(*(c[0] - p)))
-        if np.hypot(*(best[0] - p)) < INLIER_PX:
-            out.append((s, best[0], best[1]))
+        best = min(cands, key=lambda c: np.hypot(*(c[0] - p)) / c[2])
+        if np.hypot(*(best[0] - p)) < INLIER_PX * best[2]:
+            out.append((s, best[0], best[1], best[2], best[3]))
     return out
 
 
@@ -166,7 +177,7 @@ def volume_prior(P_reliable: np.ndarray) -> VolumePrior:
 
 
 def hypothesis_cost(h: Hypothesis, prior: VolumePrior | None, Xw: np.ndarray | None = None) -> float:
-    c = h.err_px / 1.5 + 0.6 * max(0, 3 - h.n) + 0.5 * (1 - min(1.0, h.angle_deg / 15.0)) + 0.3 * (1 - min(1.0, h.score))
+    c = h.nerr / 1.5 + 0.5 * h.diffuse + 0.6 * max(0, 3 - h.n) + 0.5 * (1 - min(1.0, h.angle_deg / 15.0)) + 0.3 * (1 - min(1.0, h.score))
     if prior is not None:
         c += float(prior.penalty(h.X if Xw is None else Xw)[0])
         c += min(3.0, h.sigma / (0.01 * prior.scale))  # poorly constrained depth

@@ -108,11 +108,15 @@ def solve(inp: SolveInput, progress=lambda msg: None) -> dict:
 
     # ---- chain selection with dynamic bounds (§9.6, §10) -------------------------
     def strong(h: hyp.Hypothesis, tier: int) -> bool:
+        # Counted on point-source support: light scattered by branches (diffuse) may also
+        # support the hypothesis, but doesn't make it trusted. Errors are relative to each
+        # observation's own uncertainty.
+        n_point = int(round(h.n * (1.0 - h.diffuse)))
         if tier == 1:
-            return h.n >= 3 and h.err_px < 1.5
+            return n_point >= 3 and h.nerr < 1.5
         # Tier 2, used only when tier 1 gives too few links (e.g. few views):
-        # two views at a wide angle with a tight fit.
-        return h.n >= 2 and h.err_px < 1.0 and h.angle_deg >= 20
+        # two point views at a wide angle with a tight fit.
+        return n_point >= 2 and h.nerr < 1.0 and h.angle_deg >= 20
 
     def dominant(lst: list[hyp.Hypothesis], tier: int) -> bool:
         h0 = lst[0]
@@ -158,7 +162,9 @@ def solve(inp: SolveInput, progress=lambda msg: None) -> dict:
             if led not in sel_pos and cands:
                 # A single view can't be cross-checked, so only clearly strong blobs place an LED.
                 strong = [c for c in cands if c.get("snr", 0) >= MIN_RAY_SNR]
-                ray_cands.setdefault(led, []).extend((s, np.array([c["x"], c["y"]])) for c in strong)
+                # Prefer point sources; light scattered by branches only if nothing sharper was seen.
+                points = [c for c in strong if c.get("kind", "point") == "point"]
+                ray_cands.setdefault(led, []).extend((s, np.array([c["x"], c["y"]])) for c in (points or strong))
     fp, fstatus, fsig = fillmod.fill(n, sel_pos, bounds, views, ray_cands, surface, H_world)
 
     # Visibility-side check on measured LEDs (§9.3).
@@ -235,7 +241,10 @@ def solve(inp: SolveInput, progress=lambda msg: None) -> dict:
         warnings.append("High reprojection error; the picture may have moved during capture.")
     if up_report["disagree"]:
         warnings.append("Up-direction estimates disagree: " + ", ".join(up_report["disagree"]) + ". Check the map orientation.")
-    if side < 0.7:
+    # A depth-reversed map scores about 1 - (the true value). LEDs glimpsed through the
+    # branches from the far side lower the true value, so the test is "more plausible than
+    # the reversed map", i.e. clearly above one half.
+    if side < 0.55:
         warnings.append("Visibility check failed: the map may be inside-out.")
     unknown_runs = _runs([i for i in range(n) if statuses[i] == "unknown"])
     for a, b in unknown_runs:

@@ -139,30 +139,29 @@ class Scan:
         """{segment: {led: [candidate, ...]}} from valid detections.
 
         - Spot-check captures only verify the binary pass and aren't used.
+        - A clean one-LED frame ("seq") takes precedence over binary-pass blobs for the
+          same LED; with many LEDs lit, a binary blob may be light scattered by the
+          branches rather than the LED itself. Binary blobs are used when no one-LED
+          frame found anything.
         - When an LED was captured several times in a segment, only candidates
           that repeat within 2 px are kept (architecture §7.3 step 8).
         - An LED captured in a valid frame with no candidates is recorded as
           seen-nothing (empty list): negative information for gap filling.
         """
-        attempts: dict[str, dict[int, list[list[dict]]]] = {}
+        attempts: dict[str, dict[int, dict[str, list[list[dict]]]]] = {}
         for rec in self.valid_records(kinds=("seq", "binary")):
-            attempts.setdefault(rec["segment"], {}).setdefault(int(rec["led"]), []).append(rec.get("candidates", []))
+            per = attempts.setdefault(rec["segment"], {}).setdefault(int(rec["led"]), {"seq": [], "binary": []})
+            per[rec["kind"]].append(rec.get("candidates", []))
         out: dict[str, dict[int, list[dict]]] = {}
         for seg, leds in attempts.items():
             o = out.setdefault(seg, {})
-            for led, tries in leds.items():
-                tries_nonempty = [t for t in tries if t]
-                if len(tries_nonempty) <= 1:
-                    o[led] = tries_nonempty[0] if tries_nonempty else []
-                    continue
-                kept: list[dict] = []
-                for k, t in enumerate(tries_nonempty):
-                    for c in t:
-                        others = [u for j, u in enumerate(tries_nonempty) if j != k]
-                        if any(np.hypot(c["x"] - d["x"], c["y"] - d["y"]) <= 2.0 for u in others for d in u):
-                            if not any(np.hypot(c["x"] - d["x"], c["y"] - d["y"]) <= 1.0 for d in kept):
-                                kept.append(c)
-                o[led] = sorted(kept, key=lambda c: -c.get("score", 0))[:3]
+            for led, per in leds.items():
+                seq_found = [t for t in per["seq"] if t]
+                if seq_found:
+                    o[led] = _consistent(seq_found)
+                else:
+                    binary_found = [t for t in per["binary"] if t]
+                    o[led] = _consistent(binary_found) if binary_found else []
         return out
 
     def overrides(self) -> dict:
@@ -208,3 +207,17 @@ class ScanStore:
                 storage.remove_tree(p / "frames")
                 pruned.append(p.name)
         return pruned
+
+
+def _consistent(tries: list[list[dict]]) -> list[dict]:
+    """One attempt: its candidates. Several: only candidates that repeat within 2 px."""
+    if len(tries) == 1:
+        return tries[0]
+    kept: list[dict] = []
+    for k, t in enumerate(tries):
+        for c in t:
+            others = [u for j, u in enumerate(tries) if j != k]
+            if any(np.hypot(c["x"] - d["x"], c["y"] - d["y"]) <= 2.0 for u in others for d in u):
+                if not any(np.hypot(c["x"] - d["x"], c["y"] - d["y"]) <= 1.0 for d in kept):
+                    kept.append(c)
+    return sorted(kept, key=lambda c: -c.get("score", 0))[:3]

@@ -61,7 +61,9 @@ class Cameras:
 
 
 def unambiguous(cands: list[dict]) -> np.ndarray | None:
-    if not cands:
+    """The candidate to use for camera estimation, if there's a clear one: a point
+    source (not light scattered by branches) clearly stronger than any other blob."""
+    if not cands or cands[0].get("kind", "point") != "point":
         return None
     if len(cands) == 1 or cands[1].get("score", 0) < 0.5 * cands[0].get("score", 1):
         return np.array([cands[0]["x"], cands[0]["y"]], float)

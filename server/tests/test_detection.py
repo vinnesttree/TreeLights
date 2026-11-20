@@ -54,6 +54,7 @@ def test_pattern_frames_light_each_led_in_one_frame_per_pair():
 
 
 def test_single_led_accuracy_and_color(scene):
+    """Clearly visible LEDs, with light scattered by the branches around them and needle glints."""
     ref = dark_ref(scene)
     uv, _ = scene.project_view(scene.views[0])
     vis = scene.views[0].vis
@@ -69,23 +70,96 @@ def test_single_led_accuracy_and_color(scene):
             missed += 1
             continue
         c = det.candidates[0]
-        errs.append(np.hypot(c.x - uv[i, 0] - scene.views[0].glow_offset[i, 0], c.y - uv[i, 1] - scene.views[0].glow_offset[i, 1]))
+        errs.append(np.hypot(c.x - uv[i, 0], c.y - uv[i, 1]))
+        assert c.kind == "point"
         assert color_class(np.array(c.color), basis)[0] == k % 3
     assert missed <= 1
     assert np.median(errs) < 0.35 and np.max(errs) < 1.5
 
 
-def test_hidden_led_not_detected_and_person_invalidates(scene):
+def test_partly_hidden_led_found_despite_brighter_glint():
+    """A needle glint brighter than a mostly hidden LED: the LED is still a candidate."""
+    tree = make_tree(seed=4)
+    sc = Scene(tree, seed=4, faults=Faults(glint_prob=1.0))  # every LED glints somewhere nearby
+    v = sc.add_view(0)
+    ref = dark_ref(sc)
+    uv, _ = sc.project_view(v)
+    partly = np.nonzero((v.vis > 0.12) & (v.vis < 0.4))[0][:40]
+    assert len(partly) >= 20
+    best_ok = in_cands = 0
+    for i in partly:
+        leds = np.zeros((600, 3), np.uint8)
+        leds[i] = (0, 60, 0)
+        det = detect_single(grab(sc, leds), ref, expected_color=np.array([0.1, 1, 0.15]))
+        assert det.valid
+        d = [np.hypot(c.x - uv[i, 0], c.y - uv[i, 1]) for c in det.candidates]
+        in_cands += any(x < 2.5 for x in d)
+        best_ok += bool(d) and d[0] < 2.5
+        # Nothing far from the LED: everything else is a reflection close to it.
+        assert all(x < 45 for x in d)
+    assert in_cands >= 0.9 * len(partly)
+    assert best_ok >= 0.6 * len(partly)
+
+
+def test_dim_branch_reflections_next_to_bright_led_are_dropped():
+    tree = make_tree(seed=4)
+    sc = Scene(tree, seed=4, faults=Faults(glint_prob=1.0, foliage=2.0))
+    v = sc.add_view(0)
+    ref = dark_ref(sc)
+    uv, _ = sc.project_view(v)
+    single = 0
+    bright = np.nonzero(v.vis > 0.9)[0][:30]
+    for i in bright:
+        leds = np.zeros((600, 3), np.uint8)
+        leds[i] = (0, 60, 0)
+        det = detect_single(grab(sc, leds), ref, expected_color=np.array([0.1, 1, 0.15]))
+        c = det.candidates[0]
+        assert np.hypot(c.x - uv[i, 0], c.y - uv[i, 1]) < 1.5
+        single += len(det.candidates) == 1 or det.candidates[1].score < 0.5  # unambiguous
+    assert single >= 0.9 * len(bright)
+
+
+def test_hidden_led_gives_only_nearby_reflections_and_person_invalidates(scene):
     ref = dark_ref(scene)
-    hidden = np.nonzero(scene.views[0].vis == 0)[0][0]
+    v = scene.views[0]
+    uv, _ = scene.project_view(v)
+    for hidden in np.nonzero(v.vis == 0)[0][:40]:
+        leds = np.zeros((600, 3), np.uint8)
+        leds[hidden] = (70, 70, 70)
+        det = detect_single(grab(scene, leds), ref)
+        assert det.valid
+        # The LED itself can't be seen; whatever is (glints, lit branches) is near it.
+        assert all(np.hypot(c.x - uv[hidden, 0], c.y - uv[hidden, 1]) < 45 for c in det.candidates)
+    # Without branch light, a hidden LED shows nothing at all.
+    scene.faults = Faults(foliage=0.0, glint_prob=0.0)
     leds = np.zeros((600, 3), np.uint8)
-    leds[hidden] = (70, 70, 70)
+    leds[np.nonzero(v.vis == 0)[0][0]] = (70, 70, 70)
     det = detect_single(grab(scene, leds), ref)
     assert det.valid and not det.candidates
     scene.faults = Faults(person_frames=(scene.frame_no + 1, scene.frame_no + 2))
     det = detect_single(grab(scene, leds), ref)
     scene.faults = Faults()
     assert not det.valid and det.reason == "scene_changed"
+
+
+def test_scattered_light_alone_is_diffuse_with_large_uncertainty():
+    """A hidden LED whose light is only seen on the branches around it."""
+    tree = make_tree(seed=6)
+    sc = Scene(tree, seed=6, faults=Faults(foliage=6.0, glint_prob=0.0))
+    v = sc.add_view(0)
+    ref = dark_ref(sc)
+    uv, _ = sc.project_view(v)
+    seen_diffuse = 0
+    for i in np.nonzero((v.vis == 0) & (v.patch_vis.sum(axis=1) > 0.6))[0][:25]:
+        leds = np.zeros((600, 3), np.uint8)
+        leds[i] = (0, 80, 0)
+        det = detect_single(grab(sc, leds), ref, expected_color=np.array([0.1, 1, 0.15]))
+        assert det.valid, det.reason  # a glowing branch region isn't a "scene change"
+        for c in det.candidates:
+            if c.kind == "diffuse":
+                seen_diffuse += 1
+                assert c.sigma_px >= 2.0
+    assert seen_diffuse >= 5
 
 
 def test_binary_decode_has_no_wrong_indices(scene):
@@ -101,17 +175,21 @@ def test_binary_decode_has_no_wrong_indices(scene):
     res = dec.result()
     uv, _ = scene.project_view(scene.views[0])
     v = scene.views[0]
-    true = uv + v.glow_offset
     seen = np.nonzero(v.vis > 0)[0]
     wrong = []
     for r in res:
-        d = np.hypot(true[seen, 0] - r["x"], true[seen, 1] - r["y"])
-        nearest = seen[np.argmin(d)]
-        if nearest != r["index"] and np.hypot(*(true[r["index"]] - [r["x"], r["y"]])) > 2.0:
+        d_own = np.hypot(*(uv[r["index"]] - [r["x"], r["y"]]))
+        d = np.hypot(uv[seen, 0] - r["x"], uv[seen, 1] - r["y"])
+        # Reflections off branches blink with their LED and decode to its index, near it.
+        # An identity error is a blob far from its LED or on another LED's core.
+        if d_own > 45 or (d_own > 2.5 and d.min() < 1.5 and seen[np.argmin(d)] != r["index"] and r["kind"] == "point"):
             wrong.append(r)
-    visible = len(seen)
-    assert len(wrong) == 0
-    assert len({r["index"] for r in res}) > 0.6 * visible
+    assert wrong == []
+    # Clearly visible LEDs decode at their own core; the one-at-a-time pass covers the rest.
+    at_core = {r["index"] for r in res if np.hypot(*(uv[r["index"]] - [r["x"], r["y"]])) <= 2.5}
+    clear = set(np.nonzero(v.vis > 0.5)[0])
+    assert len(at_core & clear) >= 0.75 * len(clear)
+    assert len({r["index"] for r in res}) > 0.6 * len(seen)
 
 
 def test_binary_stale_pair_is_rejected(scene):

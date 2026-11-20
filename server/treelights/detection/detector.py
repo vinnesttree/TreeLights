@@ -7,7 +7,14 @@ All images here are RGB float32 (H, W, 3). Steps:
 4. peak finding (local maxima) so an LED and a nearby reflection stay apart;
 5. core-only centroid: pixels above 50% of the peak, so glow through needles
    doesn't pull the position;
-6. frame sanity: outside candidate regions the difference must look like noise.
+6. branches: each blob is classified as a point source (the LED itself, or a
+   needle glint) or diffuse (light scattered by the branches around the LED,
+   often all that is seen of a hidden LED). Diffuse blobs carry a larger
+   position uncertainty. Dim blobs next to a much brighter point source are
+   reflections of it off nearby branches and are dropped;
+7. frame sanity: outside candidate regions the difference must look like noise.
+   A candidate's whole glow region is excluded, since lit branches around an
+   LED can spread well beyond its core.
 """
 
 from __future__ import annotations
@@ -24,7 +31,12 @@ CORE_WIN = 6
 MAX_CANDIDATES = 3
 SANITY_EXCLUDE_PX = 14
 SANITY_MAX_FRACTION = 0.0015
+MAX_GLOW_FRACTION = 0.002  # a candidate's glow region larger than this (of the image) is a scene change
 POINT_AREA = 6.0  # px above half maximum for a sharp point source
+POINT_MIN_SHARPNESS = 0.5  # below this a blob is diffuse (scattered light), not a point source
+REFLECTION_RADIUS_PX = 40.0
+REFLECTION_RATIO = 0.35  # a point blob this much dimmer than a nearby brighter one is its reflection
+DIFFUSE_WEIGHT = 0.4  # diffuse blobs rank below point sources of the same brightness
 
 
 def decode_image(data: bytes) -> np.ndarray:
@@ -65,7 +77,9 @@ class Candidate:
     sharpness: float  # 1 = point-like, lower = diffuse
     saturated: bool
     color: list[float]  # mean signed difference RGB in the core
-    score: float = 0.0
+    score: float = 0.0  # relative to the frame's strongest blob (1 = strongest)
+    kind: str = "point"  # "point" (LED or glint) | "diffuse" (light scattered by branches)
+    sigma_px: float = 0.5  # localization uncertainty
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -112,10 +126,17 @@ def measure_peak(D: np.ndarray, diff: np.ndarray | None, frame: np.ndarray | Non
     ya, yb = max(0, y - CORE_WIN), min(h, y + CORE_WIN + 1)
     win = D[ya:yb, xa:xb]
     peak = float(D[y, x])
-    core = win >= 0.5 * peak
-    wts = np.where(core, win - 0.5 * peak, 0.0)
+    # Half maximum above the local background: an LED core often sits on a pedestal of
+    # light scattered by the branches around it (or, with many LEDs lit, by its neighbours);
+    # measured from zero, the pedestal would make a sharp core look diffuse.
+    yy0, xx0 = np.mgrid[ya:yb, xa:xb]
+    ring = np.hypot(xx0 - x, yy0 - y) >= CORE_WIN - 1
+    bg = float(np.clip(np.percentile(win[ring], 20), 0.0, 0.8 * peak)) if ring.any() else 0.0
+    half = bg + 0.5 * (peak - bg)
+    core = win >= half
+    wts = np.where(core, win - half, 0.0)
     tot = float(wts.sum())
-    yy, xx = np.mgrid[ya:yb, xa:xb]
+    yy, xx = yy0, xx0
     cx = float((wts * xx).sum() / tot) if tot > 0 else float(x)
     cy = float((wts * yy).sum() / tot) if tot > 0 else float(y)
     area = float(core.sum())
@@ -123,7 +144,33 @@ def measure_peak(D: np.ndarray, diff: np.ndarray | None, frame: np.ndarray | Non
     color = diff[ya:yb, xa:xb][core].mean(axis=0).tolist() if diff is not None and core.any() else [0.0, 0.0, 0.0]
     sat = bool(frame is not None and (frame[ya:yb, xa:xb][core] >= 250).any())
     snr = peak / max(sigma, 1e-3)
-    return Candidate(cx, cy, peak, snr, sharp, sat, [float(c) for c in color])
+    kind = "point" if (sharp >= POINT_MIN_SHARPNESS or sat) else "diffuse"
+    # Point sources localize to a fraction of a pixel; for scattered light the LED can be
+    # anywhere under the glow, so the uncertainty is about the glow's radius.
+    sig_px = 0.4 / max(sharp, 0.3) if kind == "point" else max(2.0, float(np.sqrt(area / np.pi)))
+    return Candidate(cx, cy, peak, snr, sharp, sat, [float(c) for c in color], kind=kind, sigma_px=round(sig_px, 2))
+
+
+def rank_candidates(cands: list[Candidate]) -> list[Candidate]:
+    """Order by brightness (not capped SNR, so a bright LED beats a sharper but dimmer
+    glint), diffuse blobs down-weighted; drop dim point blobs next to a much brighter
+    point source (its reflections off nearby branches); normalize scores to the best."""
+    def strength(c: Candidate) -> float:
+        return c.peak * (1.0 if c.kind == "point" else DIFFUSE_WEIGHT)
+
+    cands = sorted(cands, key=lambda c: -strength(c))
+    kept: list[Candidate] = []
+    for c in cands:
+        reflection = any(
+            k.kind == "point" and np.hypot(c.x - k.x, c.y - k.y) <= REFLECTION_RADIUS_PX
+            and c.peak < REFLECTION_RATIO * k.peak for k in kept)
+        if not reflection:
+            kept.append(c)
+    if kept:
+        top = strength(kept[0])
+        for c in kept:
+            c.score = float(strength(c) / top)
+    return kept
 
 
 def project_color(diff: np.ndarray, color: np.ndarray | None) -> np.ndarray:
@@ -146,20 +193,25 @@ def detect_single(frame: np.ndarray, ref: Reference, expected_color: np.ndarray 
         return Detection([], False, "exposure_jump", sigma)
     thresh = max(K_SIGMA * sigma, ABS_FLOOR) + med
     peaks = find_peaks(Db, thresh)
-    cands = [measure_peak(Db, diff, frame, int(x), int(y), sigma) for x, y in peaks[:12]]
-    for c in cands:
-        c.score = float(min(1.0, c.snr / 40.0) * (0.3 + 0.7 * c.sharpness))
-    cands.sort(key=lambda c: -c.score)
-    # Frame sanity: changes away from the candidates must be noise.
+    all_cands = [measure_peak(Db, diff, frame, int(x), int(y), sigma) for x, y in peaks[:12]]
+    # Frame sanity: changes away from the candidates must be noise. The whole connected
+    # glow region around a candidate is excluded (lit branches spread beyond the core),
+    # unless it is so large that something other than one LED changed.
     above = (Db > thresh).astype(np.uint8)
-    for c in cands[:12]:
-        cv2.circle(above, (int(round(c.x)), int(round(c.y))), SANITY_EXCLUDE_PX, 0, -1)
+    n_lab, labels, stats, _ = cv2.connectedComponentsWithStats(above, connectivity=8)
+    max_glow = MAX_GLOW_FRACTION * above.size
+    for c in all_cands:
+        xi = int(np.clip(round(c.x), 0, above.shape[1] - 1))
+        yi = int(np.clip(round(c.y), 0, above.shape[0] - 1))
+        lab = labels[yi, xi]
+        if lab > 0 and stats[lab, cv2.CC_STAT_AREA] <= max_glow:
+            above[labels == lab] = 0
+        cv2.circle(above, (xi, yi), SANITY_EXCLUDE_PX, 0, -1)
     frac = float(above.mean())
+    cands = rank_candidates(all_cands)
     if frac > SANITY_MAX_FRACTION:
         return Detection(cands[:MAX_CANDIDATES], False, "scene_changed", sigma, frac)
-    if cands:
-        best = cands[0].score
-        cands = [c for c in cands if c.score >= 0.15 * best]
+    cands = [c for c in cands if c.score >= 0.15]
     return Detection(cands[:MAX_CANDIDATES], True, "", sigma, frac)
 
 

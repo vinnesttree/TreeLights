@@ -31,6 +31,11 @@ class Faults:
     person_frames: tuple[int, int] | None = None  # [start, end) frame numbers with a person in view
     tv_flicker: bool = False
     noise_sigma: float = 1.5
+    # Branches around each LED: light from the LED scatters off nearby needles (a diffuse glow
+    # that is still visible when the LED itself is hidden) and some needles give sharp,
+    # view-dependent glints. foliage scales the scattered light; 0 disables it.
+    foliage: float = 1.0
+    glint_prob: float = 0.15
 
 
 @dataclass
@@ -39,7 +44,8 @@ class View:
     R_tree: np.ndarray  # tree frame -> room frame
     s_tree: np.ndarray
     vis: np.ndarray  # (N,) attenuation 0..1 (0 = hidden)
-    glow_offset: np.ndarray  # (N,2) px centroid bias of LEDs seen through needles
+    glow_offset: np.ndarray  # (N,2) px: where the diffuse glow appears relative to the LED (synthetic observations)
+    patch_vis: np.ndarray | None = None  # (N, P) visibility of each lit-needle patch around each LED
 
 
 @dataclass
@@ -69,6 +75,14 @@ class Scene:
         self._noise = [nrng.standard_normal((self.height, self.width, 3), dtype=np.float32) for _ in range(6)]
         self.mirror_p0 = np.array([170.0, 0.0, 40.0])
         self.mirror_n = np.array([-1.0, 0.0, 0.0])
+        # Lit-needle patches: fixed 3D points on branches 2-8 cm around each LED (real surfaces,
+        # so they are consistent between views), each scattering a few % of the LED's light.
+        prng = np.random.default_rng(self.seed + 2)
+        n, P = self.tree.n, 6
+        d = prng.normal(0, 1, (n, P, 3))
+        d /= np.linalg.norm(d, axis=2, keepdims=True)
+        self.patch_pos = self.tree.positions[:, None, :] + d * prng.uniform(2.0, 8.0, (n, P, 1))
+        self.patch_w = prng.uniform(0.01, 0.06, (n, P))
 
     # ---- views ----------------------------------------------------------
     def add_view(self, angle_deg: float, jitter: bool = True) -> View:
@@ -78,7 +92,8 @@ class Scene:
         R_tree = tilt @ rot_y(a)
         s_tree = np.array([rng.uniform(-1.5, 1.5), 0.0, rng.uniform(-1.5, 1.5)]) if jitter else np.zeros(3)
         vis, glow = self._visibility(R_tree, s_tree)
-        v = View(a, R_tree, s_tree, vis, glow)
+        pv, _ = self._visibility(R_tree, s_tree, self.patch_pos.reshape(-1, 3))
+        v = View(a, R_tree, s_tree, vis, glow, pv.reshape(self.patch_pos.shape[:2]))
         self.views.append(v)
         return v
 
@@ -92,9 +107,9 @@ class Scene:
         u = (self.bump_R @ self.R_cam) @ np.array([0.0, 1.0, 0.0])
         return u + self.rng.normal(0, 0.005, 3)
 
-    def _visibility(self, R_tree: np.ndarray, s_tree: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _visibility(self, R_tree: np.ndarray, s_tree: np.ndarray, points: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
         tree = self.tree
-        P = tree.positions
+        P = tree.positions if points is None else points
         # Camera center in the tree frame.
         C = R_tree.T @ (self.eye - s_tree)
         ts = np.linspace(0.02, 0.98, 40)
@@ -115,6 +130,13 @@ class Scene:
         R, t = self.camera_pose(v)
         return project(self.tree.positions, R, t, self.intr)
 
+    def apparent_uv(self, v: View) -> np.ndarray:
+        """Ground truth for where each LED's core appears in the image. With branch
+        modelling on, the core is at its true projection (scattered light and glints are
+        drawn separately); the older model shifted the core itself."""
+        uv, _ = self.project_view(v)
+        return uv if self.faults.foliage else uv + v.glow_offset
+
     def render(self, v: View, leds: np.ndarray) -> np.ndarray:
         """Render a BGR uint8 image for commanded LED colors (N,3) uint8."""
         f = self.faults
@@ -134,7 +156,26 @@ class Scene:
             emit = (leds[lit] / 255.0) @ self.crosstalk.T  # camera RGB response
             dist_fac = (330.0 / np.maximum(z[lit], 1.0)) ** 2
             amp = self.led_gain * emit * (v.vis[lit] * dist_fac)[:, None]
-            centers = uv[lit] + v.glow_offset[lit]
+            centers = uv[lit] if f.foliage else uv[lit] + v.glow_offset[lit]
+            full = self.led_gain * emit * dist_fac[:, None]  # unoccluded amplitude
+            if f.foliage and v.patch_vis is not None:
+                R, t = self.camera_pose(v)
+                puv, pz = project(self.patch_pos[lit].reshape(-1, 3), R, t, self.intr)
+                puv = puv.reshape(len(lit), -1, 2)
+                albedo = np.array([0.55, 0.8, 0.45])  # needles are greenish
+                for k, i in enumerate(lit):
+                    if z[i] <= 0:
+                        continue
+                    for j in range(puv.shape[1]):
+                        w = self.patch_w[i, j] * v.patch_vis[i, j] * f.foliage
+                        if w > 0:
+                            self._splat(img, puv[k, j], full[k] * albedo * w, sigma=3.0, halo=0.0)
+                    # Specular glints off needles: sharp, view-dependent, near the LED, and up to
+                    # half as bright as the unoccluded LED (so they can beat a mostly hidden one).
+                    if f.glint_prob and _hash01(i, int(v.angle * 1000), 11) < f.glint_prob:
+                        off = (np.array([_hash01(i, int(v.angle * 1000), 12), _hash01(i, int(v.angle * 1000), 13)]) - 0.5) * 36
+                        off += np.sign(off) * 4
+                        self._splat(img, uv[i] + off, full[k] * (0.1 + 0.4 * _hash01(i, int(v.angle * 1000), 14)), sigma=1.1, halo=0.0)
             for k, i in enumerate(lit):
                 if v.vis[i] <= 0 or z[i] <= 0:
                     continue
