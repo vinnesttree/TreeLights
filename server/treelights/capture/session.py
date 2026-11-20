@@ -335,7 +335,8 @@ class CaptureSession:
             self.scan.events.append({"type": "view_done", "view": vid})
             self._emit(phase="done", message="View complete. Turn the tree for the next view.")
             if self.after_view:
-                await self.after_view(vid)
+                # In the background: the view is finished, the next one may start right away.
+                asyncio.ensure_future(self.after_view(vid))
         except Stopped:
             self.scan.set_view(vid, status="stopped")
             self._emit(phase="stopped", message="Stopped.")

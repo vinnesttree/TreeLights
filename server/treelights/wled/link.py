@@ -47,10 +47,12 @@ class WledLink:
     def on_host_change(self, fn: Callable[[str], None]) -> None:
         self._host_listeners.append(fn)
 
-    def set_host(self, host: str, mac: str | None = None) -> None:
-        if host != self.host:
+    def set_host(self, host: str, mac: str | None = None, port: int | None = None) -> None:
+        if host != self.host or (port is not None and port != self.port) or self._client is None:
             old = self._client
             self.host = host
+            if port is not None:
+                self.port = port
             self._client = WledClient(host, self.port)
             if old:
                 asyncio.ensure_future(old.close())

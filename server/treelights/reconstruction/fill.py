@@ -12,7 +12,7 @@ from scipy.optimize import least_squares
 from scipy.sparse import lil_matrix
 
 from .camera import Intrinsics, undistort_normalized
-from .chain import Bounds
+from .chain import Bounds, slack
 
 
 @dataclass
@@ -69,7 +69,7 @@ def refine_points(pos: dict[int, np.ndarray], support: dict[int, list[tuple[str,
         h = []
         for i in links:
             d = np.linalg.norm(P[li[i + 1]] - P[li[i]])
-            allowed = bounds.bound[i] + 2 * np.hypot(sigma.get(i, 0.0), sigma.get(i + 1, 0.0))
+            allowed = bounds.bound[i] + float(slack(bounds.base, sigma.get(i, 0.0), sigma.get(i + 1, 0.0)))
             h.append(max(0.0, d - allowed) * scale)
         return np.concatenate([r, np.array(h)])
 

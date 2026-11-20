@@ -88,7 +88,8 @@ def build_hypotheses(obs: dict[str, dict[int, list[dict]]], cams: Cameras, n_led
             X, errs, cov = refine_point(X, np.array(uvs), [cams.poses[s][0] for s in segs], [cams.poses[s][1] for s in segs], [Ks[s] for s in segs])
             centers = np.array([cams.center(s) for s in segs])
             dirs = (centers - X) / np.linalg.norm(centers - X, axis=1, keepdims=True)
-            ang = max(float(np.degrees(np.arccos(np.clip(dirs[i] @ dirs[j], -1, 1)))) for i in range(len(dirs)) for j in range(i + 1, len(dirs)))
+            # Triangulation strength: rays from opposite sides (near 180 deg) are as weak as near-parallel ones.
+            ang = max(_eff_angle(dirs[i], dirs[j]) for i in range(len(dirs)) for j in range(i + 1, len(dirs)))
             sigma = float(np.sqrt(max(np.linalg.eigvalsh(cov).max(), 0.0)))
             hyps.append(Hypothesis(X, segs, uvs, float(np.mean(errs)), ang, sigma, float(np.mean([sc for _, _, sc in inl]))))
         if hyps:
@@ -100,6 +101,11 @@ def build_hypotheses(obs: dict[str, dict[int, list[dict]]], cams: Cameras, n_led
                     uniq.append(h)
             out[led] = uniq[:MAX_HYPS]
     return out
+
+
+def _eff_angle(a: np.ndarray, b: np.ndarray) -> float:
+    d = float(np.degrees(np.arccos(np.clip(a @ b, -1, 1))))
+    return min(d, 180.0 - d)
 
 
 def _inliers(X: np.ndarray, by_seg: dict, cams: Cameras, Ks: dict) -> list[tuple[str, np.ndarray, float]]:
@@ -128,7 +134,7 @@ class VolumePrior:
         r = np.hypot(P[:, 0], P[:, 2])
         env = np.interp(P[:, 1], self.h, self.r_env)
         excess = np.maximum(0, r - env) + np.maximum(0, P[:, 1] - self.h_hi) + np.maximum(0, self.h_lo - P[:, 1])
-        return 3.0 * (excess / (0.1 * self.scale)) ** 2
+        return 1.5 * (excess / (0.1 * self.scale)) ** 2
 
 
 def radius_profile(P: np.ndarray, bins: int = 12, q: float = 90) -> tuple[np.ndarray, np.ndarray]:
@@ -157,11 +163,12 @@ def radius_profile(P: np.ndarray, bins: int = 12, q: float = 90) -> tuple[np.nda
 def volume_prior(P_reliable: np.ndarray) -> VolumePrior:
     h, prof = radius_profile(P_reliable)
     H = float(np.ptp(P_reliable[:, 1])) or 1.0
-    return VolumePrior(h, 1.3 * prof + 0.05 * H, float(P_reliable[:, 1].min() - 0.1 * H), float(P_reliable[:, 1].max() + 0.1 * H), H)
+    return VolumePrior(h, 1.3 * prof + 0.1 * H, float(P_reliable[:, 1].min() - 0.1 * H), float(P_reliable[:, 1].max() + 0.1 * H), H)
 
 
 def hypothesis_cost(h: Hypothesis, prior: VolumePrior | None, Xw: np.ndarray | None = None) -> float:
-    c = h.err_px / 1.5 + 1.0 * max(0, 3 - h.n) + 0.5 * (1 - min(1.0, h.angle_deg / 15.0)) + 0.5 * (1 - min(1.0, h.score))
+    c = h.err_px / 1.5 + 0.6 * max(0, 3 - h.n) + 0.5 * (1 - min(1.0, h.angle_deg / 15.0)) + 0.3 * (1 - min(1.0, h.score))
     if prior is not None:
         c += float(prior.penalty(h.X if Xw is None else Xw)[0])
+        c += min(3.0, h.sigma / (0.01 * prior.scale))  # poorly constrained depth
     return c

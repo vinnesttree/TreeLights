@@ -87,9 +87,11 @@ def solve(inp: SolveInput, progress=lambda msg: None) -> dict:
     for lst in hyps.values():
         for h in lst:
             h.X = W(h.X)[0]
-    reliable = np.array([lst[0].X for lst in hyps.values() if lst[0].n >= 3 and lst[0].err_px < 1.5])
-    if len(reliable) < 10:
-        reliable = np.array([lst[0].X for lst in hyps.values()])
+    reliable = np.array([lst[0].X for lst in hyps.values() if lst[0].n >= 3 and lst[0].err_px < 1.5]).reshape(-1, 3)
+    if len(reliable) < 0.3 * len(hyps):
+        # Too few multi-view points to outline the tree (e.g. few views): use every LED's
+        # best hypothesis; the per-height 90th percentile is robust to a few outliers.
+        reliable = np.array([lst[0].X for lst in hyps.values()]).reshape(-1, 3)
     if len(reliable) < 4:
         raise ReconstructionError("Too few LEDs could be triangulated.")
     prior = hyp.volume_prior(reliable)
@@ -105,13 +107,27 @@ def solve(inp: SolveInput, progress=lambda msg: None) -> dict:
             user["cap"] = float(inp.overrides["cap"]) / s0
 
     # ---- chain selection with dynamic bounds (§9.6, §10) -------------------------
-    def dominant(lst: list[hyp.Hypothesis]) -> bool:
+    def strong(h: hyp.Hypothesis, tier: int) -> bool:
+        if tier == 1:
+            return h.n >= 3 and h.err_px < 1.5
+        # Tier 2, used only when tier 1 gives too few links (e.g. few views):
+        # two views at a wide angle with a tight fit.
+        return h.n >= 2 and h.err_px < 1.0 and h.angle_deg >= 20
+
+    def dominant(lst: list[hyp.Hypothesis], tier: int) -> bool:
         h0 = lst[0]
-        return h0.n >= 3 and h0.err_px < 1.5 and (len(lst) == 1 or lst[1].cost > h0.cost + 1.5)
+        return strong(h0, tier) and (len(lst) == 1 or lst[1].cost > h0.cost + 1.5)
+
+    def links_in(t: set[int]) -> int:
+        return sum(1 for i in t if i + 1 in t)
 
     sel_pos = {i: lst[0].X for i, lst in hyps.items()}
     sigma = {i: lst[0].sigma for i, lst in hyps.items()}
-    trusted = {i for i, lst in hyps.items() if dominant(lst)}
+    tier = 1
+    trusted = {i for i, lst in hyps.items() if dominant(lst, 1)}
+    if links_in(trusted) < chain.MIN_TRUSTED_LINKS:
+        tier = 2
+        trusted = {i for i, lst in hyps.items() if dominant(lst, 2)}
     prev_kinds = None
     bounds = None
     selected: dict[int, int] = {}
@@ -125,7 +141,7 @@ def solve(inp: SolveInput, progress=lambda msg: None) -> dict:
         sigma = {i: hyps[i][k].sigma for i, k in selected.items()}
         support = {i: list(zip(hyps[i][k].segs, hyps[i][k].uv)) for i, k in selected.items()}
         sel_pos = fillmod.refine_points(sel_pos, support, views, bounds, sigma)
-        trusted = {i for i, k in selected.items() if hyps[i][k].n >= 3 and hyps[i][k].err_px < 1.5}
+        trusted = {i for i, k in selected.items() if strong(hyps[i][k], tier)}
         kinds = tuple(bounds.kind)
         if kinds == prev_kinds:
             break
@@ -241,6 +257,7 @@ def solve(inp: SolveInput, progress=lambda msg: None) -> dict:
             "base_link": round(bounds.base * scale, 3),
             "base_link_raw": round(bounds.base_raw * scale, 3),
             "trusted_links": bounds.trusted_links,
+            "trusted_tier": tier,
             "fallback": bounds.fallback,
             "period": bounds.period,
             "long_links": [{"from": i, "bound": round(float(bounds.bound[i] * scale), 3), "kind": bounds.kind[i]}

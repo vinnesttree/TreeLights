@@ -19,6 +19,12 @@ LONG_FACTOR = 3.0
 GAP_WINDOW = 20
 
 
+def slack(base: float, s1, s2):
+    """Allowance for position uncertainty when checking a bound, capped so a badly
+    constrained point can't hide a violation behind its own uncertainty."""
+    return np.minimum(2 * np.sqrt(np.asarray(s1) ** 2 + np.asarray(s2) ** 2), 0.5 * base)
+
+
 @dataclass
 class Bounds:
     base: float  # learned normal link length bound (world units)
@@ -59,7 +65,7 @@ def learn_bounds(n: int, pos: dict[int, np.ndarray], sigma: dict[int, float], tr
     longs = []
     if not fallback:
         for i, d in d_tr.items():
-            unc = 2 * np.hypot(sigma.get(i, 0.0), sigma.get(i + 1, 0.0))
+            unc = float(slack(base, sigma.get(i, 0.0), sigma.get(i + 1, 0.0)))
             if d <= base + unc:
                 continue
             if d <= LONG_FACTOR * base_raw:
@@ -104,7 +110,7 @@ class Node:
     cost: float
 
 
-def select_chain(n: int, nodes: dict[int, list[Node]], bounds: Bounds, c_miss: float = 2.0,
+def select_chain(n: int, nodes: dict[int, list[Node]], bounds: Bounds, c_miss: float = 2.5,
                  c_break: float = 8.0, window: int = GAP_WINDOW) -> dict[int, int]:
     """Exact shortest path through the DAG of (LED, hypothesis) nodes.
 
@@ -145,7 +151,7 @@ def select_chain(n: int, nodes: dict[int, list[Node]], bounds: Bounds, c_miss: f
                 skip = (i - j - 1) * c_miss
                 if brk[i] - brk[j] > 0:
                     continue  # across a known break: handled by the free-jump term below
-                allowed = (csum[i] - csum[j]) + 2 * np.sqrt(S[j][None, :] ** 2 + Si[:, None] ** 2)
+                allowed = (csum[i] - csum[j]) + slack(bounds.base, S[j][None, :], Si[:, None])
                 dist = np.linalg.norm(Xi[:, None, :] - X[j][None, :, :], axis=2)
                 cand = np.where(dist <= allowed, best[j][None, :] + skip, INF)
                 k = np.argmin(cand, axis=1)
@@ -198,7 +204,7 @@ def link_violations(pos: dict[int, np.ndarray], sigma: dict[int, float], bounds:
     for i in range(len(bounds.bound)):
         if i in pos and i + 1 in pos and np.isfinite(bounds.bound[i]):
             d = float(np.linalg.norm(pos[i + 1] - pos[i]))
-            allowed = bounds.bound[i] + 2 * np.hypot(sigma.get(i, 0.0), sigma.get(i + 1, 0.0))
+            allowed = bounds.bound[i] + float(slack(bounds.base, sigma.get(i, 0.0), sigma.get(i + 1, 0.0)))
             if d > allowed * 1.001:
                 out.append({"link": i, "length": d, "allowed": float(allowed)})
     return out
