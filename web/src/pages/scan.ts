@@ -59,6 +59,8 @@ export function scanPage(): Page {
   let timers: number[] = [];
   let state: "idle" | "starting" | "walking" | "stopping" | "uploading" | "processing" | "done" = "idle";
   let scan: string | null = null;
+  // ?scan=<id>: add this walk to an existing scan (a re-scan, §11.5).
+  const addTo = new URLSearchParams(location.hash.split("?")[1] ?? "").get("scan");
   let view: string | null = null;
   let server: WalkStatus | null = null;
   let visited = new Array(SECTORS).fill(false);
@@ -87,6 +89,7 @@ export function scanPage(): Page {
       const result = h("div");
       root.append(
         h("h1", {}, "Scan the tree"),
+        addTo ? h("div", { class: "notice ok" }, `This walk is added to scan ${addTo} and solved together with it.`) : "",
         h("div", { class: "card small" },
           h("ol", {},
             h("li", {}, "Turn off other lights you can. Stand far enough back that the whole tree fits in the picture."),
@@ -142,7 +145,7 @@ export function scanPage(): Page {
       function hello() {
         const { width, height } = cam!.size;
         const resume = state === "walking" || state === "stopping";
-        return { type: "hello", role: "walk", scan: resume ? scan : undefined, view: resume ? view : undefined,
+        return { type: "hello", role: "walk", scan: resume ? scan : addTo ?? undefined, view: resume ? view : undefined,
           camera: { width, height, device: cam!.deviceId, sensor: orient.source, screen: screen.orientation?.type } };
       }
 
@@ -324,7 +327,10 @@ export function scanPage(): Page {
         trySend();
       }
 
-      async function finish(m: { scan: string; view: string; upload: string; process: string }) {
+      async function finish(m: { scan: string; view: string; upload: string; process: string; reason?: string }) {
+        timers.forEach((t) => clearInterval(t));
+        timers = [];
+        if (m.reason === "server restarted") setMsg("The server restarted during the walk; using what was captured up to then.", "warn");
         // Wait for the recorder's last chunk.
         let video: Blob | null = null;
         if (recorder && recorder.state !== "inactive") {

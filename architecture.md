@@ -232,7 +232,10 @@ While the server holds the output, it polls `/json/info` about every 3 s:
 - **The lease is tied to the client's WebSocket heartbeat.** If the client disappears, the lease ends.
 - **Keepalive.** While a client holds the lease, the output thread resends the current frame every 0.5 s, whatever else is happening.
 - **Nobody holding the lease:** the server stops sending, and WLED returns to its own effects after its timeout.
-- **Restoring WLED state.** If calibration temporarily changes WLED state (for example master brightness, §7.3), the original state is saved to disk first. It is restored at the end, or at the next start-up after a crash.
+- **Restoring WLED state.** If calibration temporarily changes WLED state (for example master brightness, §7.3), the original state is saved to disk first, in `wled_restore.json` with the controller's MAC.
+  - It is restored at the end of the view or walk, at shutdown, or at the next start-up after a crash.
+  - The file is removed only once WLED has accepted the restore, so a failed restore is retried.
+  - A saved state from a different controller is discarded, not applied.
 
 ## 6. Deployment and runtime
 
@@ -242,7 +245,12 @@ While the server holds the output, it polls `/json/info` about every 3 s:
   - built in two stages: Node builds the web app, then a `python:3.12-slim` runtime;
   - runtime libraries: FastAPI/uvicorn, numpy, scipy, opencv-python-headless, zeroconf, PyAV (video decoding) and cryptography;
   - dependencies pinned in a lock file;
-  - images for amd64 and arm64 (for example a Raspberry Pi 4 or 5).
+  - images for amd64 and arm64 (for example a Raspberry Pi 4 or 5):
+    - on the Pi, `docker compose up --build` builds natively;
+    - `docker/build-multiarch.sh` builds both with buildx, where QEMU emulation is set up;
+    - every pinned Python dependency has a prebuilt aarch64 wheel for Python 3.12 (checked), so nothing compiles on the Pi;
+    - both base images publish `linux/arm64`;
+    - the web stage runs on the build machine's own platform, since its output is static files.
 - **docker-compose:**
   - `network_mode: host`, needed for mDNS discovery;
   - `restart: unless-stopped` and a healthcheck;
@@ -349,6 +357,9 @@ Chrome only allows camera access on secure (HTTPS) pages. The setup works like t
 3. **Auto-brightness.**
    - Using the same LEDs, find the level where typical LEDs are bright but not saturated.
    - If WLED's master brightness keeps it too low, the server can raise it temporarily. The old value is saved and restored (§5.4).
+   - In practice: when even level 255 is too dim, master brightness goes to full once per view, and the color check and levels are re-measured.
+   - It isn't raised when WLED's "force max brightness" realtime option is on, since master brightness then has no effect.
+   - The walk-around capture does the same if the LEDs are still faint at its top level during its first two cycles (§7.9).
 4. **Dark reference.**
    - 5 dark frames, combined by median.
    - Plus the **reference constellation**: about 20 LEDs, spread by index, lit together. It's used for movement checks (§7.5).
@@ -460,7 +471,9 @@ When a frame is rejected:
   1. The phone reconnects with its session ID.
   2. The server takes a new dark reference and constellation.
   3. If the constellation matches, the segment continues; otherwise a new segment starts.
-- **Server restart.** Every event is appended to a log on disk, so after a restart the session is rebuilt from the log and can resume.
+- **Server restart.** Every event and detection is appended to logs on disk. At start-up the server looks for captures that were running when it stopped:
+  - **A tripod view** that was being captured: its scan is reopened, and the next "Start view" continues that view. It takes a fresh dark reference and constellation in a new segment, then captures only the LEDs still missing, so nothing captured before the restart is lost or repeated. The retry pass may still re-capture ambiguous LEDs, as it always does.
+  - **A walk** that was in progress: it ends where it stopped, and its live frames and motion log are kept. When the phone reconnects, it is told the walk ended, uploads its recording, and the walk is processed as usual.
 
 ### 7.7 Recorded-video mode
 
@@ -796,13 +809,18 @@ Every solve writes a new, immutable map version. Nothing changes on the tree unt
 
 ### 11.4 WLED fingerprint
 
-Each map stores the controller's MAC address and a hash of its LED-output and realtime configuration. The fingerprint is checked at start-up and before activation. A mismatch shows a warning.
+Each map stores the controller's MAC address and a hash of its LED-output and realtime configuration.
+- **When it's checked:** at start-up (logged), whenever a page reads the server state, and before activation.
+- **What's compared:** the active map's MAC, LED count and hash against the live controller.
+- **A mismatch** shows a warning on the home, Map and Test pages that says what changed: another controller, a different LED count, or changed outputs or realtime settings. Activating a mismatching map needs a confirmation.
 
 ### 11.5 Re-scan and maintenance
 
-1. Select LEDs to re-scan, or choose "all low-confidence".
-2. A short capture covers those LEDs plus about 40 well-measured LEDs spread across the image, so the new segment can be registered.
-3. The result is merged with the existing scan into a new map version.
+1. **Select LEDs to re-scan** on the Map page: type a list (`12, 40-45`), add the selected LED, or choose "all low-confidence". Low confidence means not measured from two or more views, or measured with an uncertainty over 2.5× the map's median. Manual positions are left alone. "Show on tree" blinks the chosen LEDs, so you can see where they are.
+2. **A short capture** covers those LEDs plus well-measured anchor LEDs, so the new camera can be registered. Anchors are the best-measured LED in each of 12 azimuth sectors × 5 height bands, up to 60, so a good share face the camera wherever it stands. The capture method follows the scan:
+   - **Tripod scans:** a `rescan` view, started from Control. It captures exactly the chosen LEDs and anchors, one at a time with the usual verification (§7.4), with no binary pass.
+   - **Walk scans:** walk again, all the way round or just past the weak side. The Scan page adds the walk to the same scan (`#/scan?scan=<id>`). A tripod capture isn't mixed into a walk scan: the solver shares one focal length across segments (§9.2), and the walk's video and tripod photos differ in crop and resolution.
+3. **The result is solved with the existing scan** into a new map version, aligned to the previous one (§9.10). The active map is unchanged until you activate the new version.
 
 Use the same flow when the tree has settled or been bumped.
 
@@ -830,7 +848,7 @@ Use the same flow when the tree has settled or been bumped.
 /data/
   config.json
   tls/                       local CA and server certificate
-  wled_restore.json          WLED state saved while calibration changes it
+  wled_restore.json          WLED state saved while calibration changes it (§5.4)
   scans/<scan>/
     scan.json                settings, segments, camera info
     events.jsonl             append-only session log
@@ -944,6 +962,7 @@ docker/              Dockerfile, docker-compose.yml
 - **Video:** `POST /api/scans/{scan}/sequence/play`, and `POST /api/scans/{scan}/videos` (resumable upload)
 - **Solving:** `POST /api/scans/{scan}/solve` returns a job; `GET /api/jobs/{job}`
 - **Maps:** `GET /api/maps`, `GET /api/maps/{map}`, `POST /api/maps/{map}/activate`, `GET /api/maps/{map}/export?fmt=json|csv`
+- **Re-scan (§11.5):** `GET /api/maps/{map}/rescan` (the low-confidence LEDs), `POST /api/maps/{map}/rescan {leds | text | low_confidence}`, `POST /api/leds/show {leds}`; the tripod view starts with `start_view {mode: "rescan"}` on `/ws/control`.
 - **Test animation:** `POST /api/test/start`, `POST /api/test/stop`, and `WSS /ws/preview` (live colors for the 3D view)
 - **Camera calibration:** `POST /api/camera-profiles`
 

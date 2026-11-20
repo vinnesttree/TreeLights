@@ -105,6 +105,12 @@ class CaptureSession:
         self._status_listeners: list[Callable[[dict], None]] = []
         self.predicted_visible: Callable[[str], set[int] | None] | None = None  # set by live reconstruction
         self.after_view: Callable[[str], Awaitable[None]] | None = None
+        # Raise WLED's master brightness temporarily when LEDs are too dim (§7.3); the
+        # app saves the original first and restores it (§5.4).
+        self.boost_brightness: Callable[[], Awaitable[bool]] | None = None
+        self.restore_brightness: Callable[[], Awaitable[bool]] | None = None
+        self._boost_tried = False
+        self.interrupted_view: str | None = None  # set after a server restart (§7.6)
         self.seg: SegmentState | None = None
         self.cal = Calibration()
         self._hb_task: asyncio.Task | None = None
@@ -190,10 +196,16 @@ class CaptureSession:
         if self._task and not self._task.done() and ev.kind != "recovered":
             self._interrupt = ev
 
-    def start_view(self, mode: str = "hybrid", view_id: str | None = None) -> str:
+    def start_view(self, mode: str = "hybrid", view_id: str | None = None, leds: list[int] | None = None) -> str:
+        """mode: "hybrid", "sequential", or "rescan" (§11.5): only `leds` (the LEDs to
+        re-scan plus anchors to register the new camera), one at a time."""
         if self._task and not self._task.done():
             raise RuntimeError("a view is already being captured")
-        vid = view_id or self.scan.add_view({"mode": mode})
+        if mode == "rescan":
+            leds = sorted({int(i) for i in (leds or []) if 0 <= int(i) < self.n})
+            if not leds:
+                raise RuntimeError("nothing to re-scan")
+        vid = view_id or self.scan.add_view({"mode": mode, **({"leds": leds} if mode == "rescan" else {})})
         self._stop = False
         self._task = asyncio.ensure_future(self._run_view(vid, mode))
         return vid
@@ -331,7 +343,12 @@ class CaptureSession:
                 if not self._captured_in_view(vid, kinds=("binary",)):
                     await self._with_movement(vid, self._binary_pass, vid)
                 decoded, diffuse_only = self._binary_split(vid)
-            queue = self._sequential_queue(vid, remaining, decoded, mode)
+            if mode == "rescan":
+                order = np.array(self.scan.view(vid).get("leds") or [], int)
+                self.rng.shuffle(order)  # scattered order (§7.4)
+                queue = order.tolist()
+            else:
+                queue = self._sequential_queue(vid, remaining, decoded, mode)
             # LEDs the binary pass only saw as light scattered by branches get a clean
             # one-LED frame too: the LED itself may be visible there.
             extra = np.array(sorted(i for i in diffuse_only if i not in queue), int)
@@ -342,7 +359,8 @@ class CaptureSession:
             await self._with_movement(vid, self._final_check)
             self.scan.set_view(vid, status="done")
             self.scan.events.append({"type": "view_done", "view": vid})
-            self._emit(phase="done", message="View complete. Turn the tree for the next view.")
+            self._emit(phase="done", message="Re-scan complete. Solve the map to include it." if mode == "rescan"
+                       else "View complete. Turn the tree for the next view.")
             if self.after_view:
                 # In the background: the view is finished, the next one may start right away.
                 asyncio.ensure_future(self.after_view(vid))
@@ -355,6 +373,12 @@ class CaptureSession:
             self._emit(phase="failed", message=f"Capture failed: {e}")
         finally:
             self.output.release(self.owner)
+            if self.restore_brightness:
+                try:
+                    await self.restore_brightness()
+                except Exception as e:  # noqa: BLE001
+                    log.warning("couldn't restore WLED brightness (retried at start-up): %s", e)
+            self._boost_tried = False
 
     async def _wait_camera(self) -> None:
         if not self._camera_ready.is_set():
@@ -547,6 +571,18 @@ class CaptureSession:
             cal.levels[cls] = int(np.clip(test_level * TARGET_PEAK / max(p75, 1.0), 6, 255))
         cal.binary_level = int(np.clip(min(cal.levels) * 0.6, 6, 255))
         if np.any(cal.levels >= 255):
+            if self.boost_brightness and not self._boost_tried:
+                self._boost_tried = True
+                try:
+                    raised = await self.boost_brightness()
+                except Exception as e:  # noqa: BLE001
+                    log.warning("couldn't raise WLED brightness: %s", e)
+                    raised = False
+                if raised:
+                    self.scan.events.append({"type": "wled_brightness_raised"})
+                    self._emit(message="LEDs are dim: raised WLED's master brightness for calibration (restored afterwards).")
+                    await self._color_check()
+                    return
             cal.warnings.append("LEDs are dim for this camera even at full level; raise WLED's master brightness if detection is poor.")
         self.cal = cal
         for w in cal.warnings:

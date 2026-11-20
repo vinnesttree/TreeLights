@@ -22,8 +22,13 @@ export function testPage(): Page {
         }
       }
 
+      const mapWarning = h("div");
+      api("/api/state").then((s) => {
+        if (s.map_warning) mapWarning.replaceChildren(h("div", { class: "notice warn" }, s.map_warning));
+      }).catch(() => {});
       root.append(
         h("h1", {}, "Test"),
+        mapWarning,
         msg,
         h("div", { class: "card" },
           h("div", { class: "row" },

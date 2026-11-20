@@ -35,11 +35,11 @@ class Sim:
     executor: concurrent.futures.Executor
     angles: list[float] = field(default_factory=list)
 
-    async def run_view(self, angle: float, mode: str = "hybrid") -> str:
+    async def run_view(self, angle: float, mode: str = "hybrid", leds: list[int] | None = None) -> str:
         self.scene.add_view(angle)
         self.phone.view_index = len(self.scene.views) - 1
         self.angles.append(angle)
-        vid = self.session.start_view(mode)
+        vid = self.session.start_view(mode, leds=leds)
         await self.session.wait_done()
         return vid
 

@@ -30,6 +30,7 @@ export function homePage(): Page {
           h("div", {}, `LEDs: ${s.led_count}`),
           h("div", {}, `Tree height: ${s.tree_height_cm ? s.tree_height_cm + " cm" : "not set"}`),
           h("div", {}, `Active map: ${s.active_map ?? "none yet"}`),
+          s.map_warning ? h("div", { class: "notice warn" }, s.map_warning) : "",
           h("div", {}, `Current scan: ${s.scan ?? "none"}`),
         );
       }).catch((e) => status.replaceChildren(h("div", { class: "notice fail" }, fmtErr(e))));

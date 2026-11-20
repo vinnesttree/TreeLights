@@ -94,6 +94,9 @@ class WalkSession:
         self.disconnected_at: float | None = None
         self.coverage = LiveCoverage()  # touched only by the analysis thread
         self._level_changes = 0
+        self.boost_brightness: Callable[[], Awaitable[bool]] | None = None  # set by the app (§7.3)
+        self.restore_brightness: Callable[[], Awaitable[bool]] | None = None
+        self._boost_tried = False
 
     # ---- lifecycle ---------------------------------------------------------------
     def start(self, camera: dict) -> str:
@@ -120,6 +123,11 @@ class WalkSession:
             return self.status
         self.state = "stopped"
         self.output.release(OWNER)
+        if self.restore_brightness:
+            try:
+                await self.restore_brightness()
+            except Exception as e:  # noqa: BLE001
+                log.warning("couldn't restore WLED brightness (retried at start-up): %s", e)
         if self._task:
             self._task.cancel()
         # Let queued detections finish so the stored frame list is complete.
@@ -229,6 +237,13 @@ class WalkSession:
                            "level": self.pattern.level, "frames": len(self.frame_meta), **st}
             await self._emit(self.status)
 
+    async def _boost(self) -> None:
+        try:
+            if self.boost_brightness and await self.boost_brightness():
+                self.scan.events.append({"type": "wled_brightness_raised", "view": self.vid})
+        except Exception as e:  # noqa: BLE001
+            log.warning("couldn't raise WLED brightness: %s", e)
+
     def _adapt_level(self, st: dict) -> None:
         """Brightness is settled during the first cycles of the walk, then left alone.
 
@@ -250,6 +265,11 @@ class WalkSession:
         elif sat < 0.02 and peak < 25 and lv < 200:
             self.pattern.set_level(int(lv * 1.6) + 1)
             self._level_changes += 1
+        elif sat < 0.02 and peak < 25 and self.boost_brightness and not self._boost_tried:
+            # Still faint at the top level: raise WLED's master brightness (counts as a change).
+            self._boost_tried = True
+            self._level_changes += 1
+            asyncio.ensure_future(self._boost())
 
 
 def _detect(jpeg: bytes) -> tuple[np.ndarray, int, int]:

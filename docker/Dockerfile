@@ -1,6 +1,8 @@
 # TreeLights: one image with the web app and the Python server (architecture §6.1).
 
-FROM node:22.12.0-bookworm-slim AS web
+# The web app is static files: build it on the build machine's own platform, so a
+# cross-build for arm64 doesn't emulate Node.
+FROM --platform=$BUILDPLATFORM node:22.12.0-bookworm-slim AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund

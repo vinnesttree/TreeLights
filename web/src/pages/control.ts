@@ -12,6 +12,8 @@ export function controlPage(): Page {
       const modeSelect = h("select", {},
         h("option", { value: "hybrid" }, "Hybrid (fast, default)"),
         h("option", { value: "sequential" }, "One LED at a time (slower)")) as HTMLSelectElement;
+      const rescanOpt = h("option", { value: "rescan", disabled: true }, "Re-scan (set up on the Map page)") as HTMLOptionElement;
+      modeSelect.append(rescanOpt);
       const solveBox = h("div");
       let scanId: string | null = null;
 
@@ -21,6 +23,13 @@ export function controlPage(): Page {
         const s = await api("/api/state");
         scanId = s.scan;
         scanInfo.textContent = scanId ? `Scan ${scanId}` : "No scan yet: starting a view creates one.";
+        const r = s.rescan;
+        rescanOpt.disabled = !r;
+        rescanOpt.textContent = r ? `Re-scan ${r.leds} LEDs (+${r.anchors} anchors)` : "Re-scan (set up on the Map page)";
+        if (r && modeSelect.dataset.auto !== "done") {
+          modeSelect.value = "rescan";
+          modeSelect.dataset.auto = "done";
+        }
         if (s.session) sv.update({ ...s.session, guidance: s.guidance } as Status);
       }
 

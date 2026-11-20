@@ -23,6 +23,7 @@ docker compose -f docker/docker-compose.yml up -d --build
 docker compose -f docker/docker-compose.yml logs treelights   # shows the URL and a QR code
 ```
 
+- **Raspberry Pi 4/5 (arm64):** the same commands build natively on the Pi. To build both architectures elsewhere, use `docker/build-multiarch.sh` (needs Docker buildx with QEMU emulation).
 - The app listens on **https://&lt;host&gt;:8443**. A plain-HTTP setup page with a QR code and help is on **http://&lt;host&gt;:8080**.
 - Data is kept in `docker/data/`: config, certificates, scans and maps.
 - **Firewall:** if the host runs one, allow TCP 8443 and 8080 from the LAN, and UDP 5353 for mDNS discovery.
@@ -51,6 +52,7 @@ docker compose -f docker/docker-compose.yml logs treelights   # shows the URL an
    - Tap an LED to blink it on the real tree.
    - Fix problems by marking an LED bad, moving it, or adding or removing a chain break, then re-solve.
    - *Activate* the version you want. The previous one stays available for roll-back.
+   - **Re-scan** weak spots: choose LEDs (or *All low-confidence*), *Show on tree* to see where they are, then *Set up re-scan*. For a walk scan, walk again past them; for a tripod scan, start the re-scan view from Control. The result is solved with the original capture into a new version.
 4. **Test.** Run the sweep test and check it looks clean on the tree. *Status colors* shows which LEDs were measured (green), placed from one view (yellow), estimated (orange) or are unknown (off).
 
 **Advanced: tripod capture.** For a tree that can be turned, or one you can't walk around (see *Advanced* on the home page):
@@ -128,4 +130,5 @@ Layout:
 | "The picture keeps moving" | Check the tripod. Let the tree settle after turning it. Keep people and pets out of the picture. |
 | Few LEDs measured | Add views, especially from directions the guidance suggests. Dim the room. Make sure the whole tree is in the picture. LEDs deep inside the branches may only be seen from one side; they're placed from the wiring and marked *single view* or *estimated*. |
 | "LEDs N–M were never seen" | WLED's LED count may be larger than the string, or those LEDs aren't connected. |
+| "The active map was made with another WLED controller" or "LED configuration changed" | WLED's LED count, outputs or realtime settings differ from when the map was made. Change them back, or re-scan if the LEDs are now wired differently. |
 | Map looks upside down or tilted | The report lists which "up" estimates disagree. Re-solve after adding views. |

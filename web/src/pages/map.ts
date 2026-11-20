@@ -11,6 +11,7 @@ export function mapPage(): Page {
       const viewerBox = h("div", { class: "viewer" });
       const sel = h("div", { class: "muted small" }, "Tap an LED to select it.");
       const editsBox = h("div", { class: "small" });
+      const rescanBox = h("div");
       let map: TreeMap | null = null;
       let overrides: any = {};
       let selected: number | null = null;
@@ -47,6 +48,7 @@ export function mapPage(): Page {
         viewer!.setMap(map);
         renderReport();
         renderEdits();
+        renderRescan();
         selectLed(null);
       }
 
@@ -74,6 +76,7 @@ export function mapPage(): Page {
 
       function selectLed(i: number | null) {
         selected = i;
+        if (map) renderRescan();
         viewer?.select(i);
         viewer?.stopDrag();
         if (i === null || !map) {
@@ -143,6 +146,90 @@ export function mapPage(): Page {
         }
       }
 
+      // ---- re-scan (§11.5) ----
+      const rescanInput = h("input", { type: "text", placeholder: "e.g. 12, 40-45, 300" }) as HTMLInputElement;
+      const rescanMsg = h("div");
+      let lowConfidence: number[] = [];
+
+      async function renderRescan() {
+        if (!map) return;
+        try {
+          const info = await api(`/api/maps/${map.id}/rescan`);
+          lowConfidence = info.low_confidence;
+        } catch {
+          lowConfidence = [];
+        }
+        rescanBox.replaceChildren(
+          h("h2", {}, "Re-scan"),
+          h("p", { class: "small muted" },
+            "Capture some LEDs again: ones that weren't measured from two views, or that look wrong. ",
+            "The new capture is added to this scan and solved with everything else into a new version."),
+          h("label", {}, "LEDs"),
+          rescanInput,
+          h("div", { class: "row", style: { marginTop: "8px" } },
+            h("button", { onclick: () => { rescanInput.value = compact(lowConfidence); } }, `All low-confidence (${lowConfidence.length})`),
+            selected !== null ? h("button", { onclick: () => { rescanInput.value = [rescanInput.value, String(selected)].filter(Boolean).join(", "); } }, `Add LED ${selected}`) : "",
+            h("button", { onclick: showOnTree }, "Show on tree"),
+            h("button", { onclick: () => api("/api/test/stop", { body: {} }).catch(() => {}) }, "Stop showing"),
+          ),
+          h("div", { class: "row", style: { marginTop: "8px" } }, h("button", { class: "primary", onclick: startRescan }, "Set up re-scan")),
+          rescanMsg,
+        );
+      }
+
+      function compact(list: number[]): string {
+        const out: string[] = [];
+        let i = 0;
+        while (i < list.length) {
+          let j = i;
+          while (j + 1 < list.length && list[j + 1] === list[j] + 1) j++;
+          out.push(j > i ? `${list[i]}-${list[j]}` : `${list[i]}`);
+          i = j + 1;
+        }
+        return out.join(", ");
+      }
+
+      function parseList(): number[] {
+        const out = new Set<number>();
+        for (const part of rescanInput.value.split(/[,\s]+/).filter(Boolean)) {
+          const m = part.match(/^(\d+)-(\d+)$/);
+          if (m) for (let k = Math.min(+m[1], +m[2]); k <= Math.max(+m[1], +m[2]); k++) out.add(k);
+          else if (/^\d+$/.test(part)) out.add(+part);
+        }
+        return [...out].sort((a, b) => a - b);
+      }
+
+      async function showOnTree() {
+        const leds = parseList();
+        if (!leds.length) return rescanMsg.replaceChildren(h("div", { class: "notice warn" }, "Choose LEDs first."));
+        try {
+          await api("/api/leds/show", { body: { leds } });
+          rescanMsg.replaceChildren(h("div", { class: "notice ok" }, `${leds.length} LEDs are blinking on the tree.`));
+        } catch (e) {
+          rescanMsg.replaceChildren(h("div", { class: "notice fail" }, fmtErr(e)));
+        }
+      }
+
+      async function startRescan() {
+        if (!map) return;
+        try {
+          const r = await api(`/api/maps/${map.id}/rescan`, { body: { text: rescanInput.value } });
+          await api("/api/test/stop", { body: {} }).catch(() => {});
+          if (r.kind === "walk") {
+            rescanMsg.replaceChildren(h("div", { class: "notice ok" },
+              `Walk again past those ${r.leds.length} LEDs (all the way round, or just that side). The walk is added to the same scan. `,
+              h("a", { href: `#/scan?scan=${encodeURIComponent(r.scan)}` }, "Open the Scan page")));
+          } else {
+            rescanMsg.replaceChildren(h("div", { class: "notice ok" },
+              `Re-scan set up: ${r.leds.length} LEDs plus ${r.anchors.length} well-measured anchor LEDs to place the camera. `,
+              "Put the phone where it sees those LEDs, open ", h("a", { href: "#/calibrate" }, "Calibrate"),
+              " on it, then start the re-scan from ", h("a", { href: "#/control" }, "Control"), ". Solve afterwards."));
+          }
+        } catch (e) {
+          rescanMsg.replaceChildren(h("div", { class: "notice fail" }, fmtErr(e)));
+        }
+      }
+
       async function activate(force = false) {
         if (!map) return;
         try {
@@ -162,8 +249,13 @@ export function mapPage(): Page {
         await loadVersions(r.active ?? undefined);
       }
 
+      const mapWarning = h("div");
+      api("/api/state").then((s) => {
+        if (s.map_warning) mapWarning.replaceChildren(h("div", { class: "notice warn" }, s.map_warning));
+      }).catch(() => {});
       root.append(
         h("h1", {}, "Map"),
+        mapWarning,
         msg,
         h("div", { class: "card" },
           h("label", {}, "Version"),
@@ -178,6 +270,7 @@ export function mapPage(): Page {
         viewerBox,
         h("div", { class: "legend" }, ...Object.entries(STATUS_COLORS).map(([k, c]) => h("span", { style: { "--c": c } as any }, k.replace("_", " ")))),
         h("div", { class: "card", style: { marginTop: "12px" } }, sel, editsBox),
+        h("div", { class: "card" }, rescanBox),
         h("div", { class: "card" }, h("h2", {}, "Quality report"), report),
       );
       const id = new URLSearchParams(location.hash.split("?")[1] ?? "").get("id") ?? undefined;

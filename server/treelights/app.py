@@ -24,6 +24,7 @@ from .capture.store import ScanStore
 from .config import ConfigStore
 from .effects import EFFECTS, Identify, TreeGeometry, make_renderer
 from .maps import guidance as guide
+from .maps import rescan
 from .maps.store import ActivationBlocked, MapStore, export_csv
 from .output.manager import OutputManager, PowerLimiter
 from .reconstruction.job import run_solve
@@ -31,6 +32,7 @@ from .walk import protocol as walkproto
 from .walk.job import process_walk
 from .walk.session import WalkSession
 from .wled import discovery
+from .wled.brightness import BrightnessGuard
 from .wled.client import config_fingerprint
 from .wled.ddp import UdpFrameSender
 from .wled.link import WledLink, WledMonitor
@@ -64,6 +66,7 @@ class AppState:
         self.link = WledLink(s.wled.host, s.wled.mac, s.wled.http_port)
         self.link.on_host_change(lambda h: self._apply_sender())
         self.monitor = WledMonitor(self.link, lambda: self.output.holder() is not None)
+        self.brightness = BrightnessGuard(self.data_dir, self.link)
         if executor is None:
             ctx = multiprocessing.get_context("spawn")
             executor = concurrent.futures.ProcessPoolExecutor(max_workers=max(1, min(4, (os.cpu_count() or 2) - 1)), mp_context=ctx)
@@ -115,6 +118,7 @@ class AppState:
         if self.session:
             asyncio.ensure_future(self.session.stop())
         sess = CaptureSession(scan, self.output, self.capture_executor, s)
+        sess.boost_brightness, sess.restore_brightness = self.brightness.boost, self.brightness.restore
         sess.on_status(self.broadcast_status)
         sess.after_view = self._after_view
         self.monitor_unsub = self.monitor.subscribe(sess.on_monitor)
@@ -145,6 +149,7 @@ class AppState:
             lv = [int(v) for v in self.session.cal.levels if v]
             level = int(np.median(lv)) if lv else level
         self.walk = WalkSession(scan, self.output, level=level)
+        self.walk.boost_brightness, self.walk.restore_brightness = self.brightness.boost, self.brightness.restore
         return self.walk
 
     def start_walk_processing(self, scan_id: str, vid: str, video_path: str | None) -> Job:
@@ -181,6 +186,57 @@ class AppState:
 
     def fingerprint(self) -> str | None:
         return config_fingerprint(self.link.info, self.link.cfg) if self.link.info else None
+
+    def recover(self) -> dict:
+        """After a restart (§7.6): captures that were running when the server stopped.
+
+        - A walk that was in progress is ended where it stopped: its live frames are on
+          disk, and the phone, when it reconnects, is told to upload its recording.
+        - A tripod view that was being captured is reopened in its scan; the next
+          "start view" continues it, keeping everything already captured.
+        Only the most recent scan is reopened."""
+        out: dict = {"walks": [], "view": None}
+        latest = None
+        for p in sorted(self.scans.dir.iterdir(), reverse=True):
+            try:
+                scan = self.scans.get(p.name)
+            except FileNotFoundError:
+                continue
+            for v in scan.meta.get("views", []):
+                if v.get("mode") == "walk" and v.get("status") == "walking":
+                    scan.set_view(v["id"], status="awaiting_upload", stop_reason="server restarted")
+                    scan.events.append({"type": "walk_interrupted", "view": v["id"]})
+                    out["walks"].append((scan.id, v["id"]))
+                elif v.get("status") == "capturing" and latest is None:
+                    latest = (scan, v)
+        if latest is not None:
+            scan, v = latest
+            sess = self.open_session(scan.id)
+            sess.interrupted_view = v["id"]
+            sess._emit(message=f"View {v['id']} was interrupted when the server stopped. Start view continues it.")
+            scan.events.append({"type": "view_interrupted", "view": v["id"]})
+            out["view"] = (scan.id, v["id"])
+        return out
+
+    def map_check(self) -> str | None:
+        """Does the active map still match the controller (§11.4)? A warning, or None.
+        Checked at start-up, whenever the state is read, and before activation."""
+        m = self.maps.active()
+        if not m or not self.link.info:
+            return None
+        w = m.get("wled") or {}
+        mac, n = self.link.info.mac or self.link.mac, self.link.info.led_count
+        if w.get("mac") and mac and w["mac"].lower() != mac.lower():
+            return (f"The active map was made with another WLED controller (MAC {w['mac']}, now {mac}). "
+                    "If the string moved to a new controller with the same wiring, the map still fits; otherwise re-scan.")
+        if n and len(m.get("leds", [])) != n:
+            return (f"The active map has {len(m['leds'])} LEDs but WLED now drives {n}. "
+                    "Check WLED's LED count, or re-scan.")
+        fp = self.fingerprint()
+        if w.get("config_hash") and fp and w["config_hash"] != fp:
+            return ("WLED's LED configuration (outputs, LED count or realtime settings) changed since the active map was made. "
+                    "If LEDs now light in a different order, re-scan; otherwise change it back in WLED.")
+        return None
 
     def broadcast_status(self, st: dict) -> None:
         msg = dict(st, guidance=self.guidance)
@@ -242,7 +298,7 @@ class AppState:
         return job
 
     # ---- test animation --------------------------------------------------------------------
-    def start_effect(self, name: str, brightness: float, index: int | None = None) -> None:
+    def start_effect(self, name: str, brightness: float, index: int | list[int] | None = None) -> None:
         owner = "test"
         kind = "identify" if name == "identify" else "test"
         ok, holder = self.output.acquire(owner, kind, ttl=3600)
@@ -252,7 +308,7 @@ class AppState:
         n = self.output.led_count
         tree = TreeGeometry.from_map(m) if m and len(m["leds"]) == n else TreeGeometry.chain_only(n)
         if name == "identify":
-            eff = Identify(int(index or 0))
+            eff = Identify(index if isinstance(index, list) else int(index or 0))
         else:
             if name not in EFFECTS:
                 raise HTTPException(404, f"unknown effect {name}")
@@ -273,10 +329,18 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
 
     @app.on_event("startup")
     async def _startup() -> None:
+        rec = state.recover()
+        if rec["view"] or rec["walks"]:
+            log.info("recovered after restart: %s", rec)
         if state.link.host:
             try:
                 await state.link.refresh(with_cfg=True)
                 state._apply_power()
+                warning = state.map_check()
+                if warning:
+                    log.warning("active map: %s", warning)
+                if state.brightness.boosted:  # the server stopped during a calibration (§5.4)
+                    await state.brightness.restore()
             except Exception as e:  # noqa: BLE001
                 log.warning("WLED not reachable at start-up: %s", e)
         state.monitor.start()
@@ -287,6 +351,11 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
             await state.session.stop()
         if state.walk:
             await state.walk.stop("server shutdown")
+        if state.brightness.boosted:
+            try:
+                await state.brightness.restore()
+            except Exception as e:  # noqa: BLE001
+                log.warning("couldn't restore WLED brightness; will retry at start-up: %s", e)
         await state.monitor.stop()
         await state.link.close()
         state.output.stop()
@@ -329,8 +398,11 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
             "led_count": state.output.led_count,
             "lease": None if not lease else {"owner": lease.owner, "kind": lease.kind},
             "active_map": state.maps.active_id(),
+            "map_warning": state.map_check(),
             "scan": state.session.scan.id if state.session else None,
             "session": state.session.status if state.session else None,
+            "rescan": None if not (state.session and state.session.scan.meta.get("rescan")) else
+            {k: len(v) if isinstance(v, list) else v for k, v in state.session.scan.meta["rescan"].items()},
             "guidance": state.guidance,
             "tree_height_cm": state.config.settings.tree_height_cm,
         }
@@ -570,6 +642,63 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
         asyncio.ensure_future(run())
         return job.to_dict()
 
+    # ---- re-scan and maintenance (§11.5) --------------------------------------------------------
+    def _scan_kind(scan) -> str:  # noqa: ANN001
+        modes = [v.get("mode") for v in scan.meta["views"] if v.get("status") in ("done", "processed")]
+        return "walk" if modes and all(m == "walk" for m in modes) else "tripod"
+
+    @app.get("/api/maps/{mid}/rescan")
+    def rescan_info(mid: str) -> dict:
+        m = get_map(mid)
+        low = rescan.low_confidence(m)
+        try:
+            kind = _scan_kind(state.scans.get(m["scan"]))
+        except FileNotFoundError:
+            kind = None
+        return {"map": mid, "scan": m["scan"], "kind": kind, "low_confidence": low, "n": len(m["leds"])}
+
+    @app.post("/api/maps/{mid}/rescan")
+    async def rescan_setup(mid: str, body: dict = Body(default={})) -> dict:
+        """Choose LEDs to re-scan; sets up the capture in the map's scan. Tripod scans
+        get a pending re-scan view (started from Control or Calibrate); walk scans are
+        re-scanned by walking again into the same scan (the Scan page with ?scan=)."""
+        m = get_map(mid)
+        n = len(m["leds"])
+        try:
+            if body.get("low_confidence"):
+                leds = rescan.low_confidence(m)
+            elif body.get("text") is not None:
+                leds = rescan.parse_selection(str(body["text"]), n)
+            else:
+                leds = sorted({int(i) for i in body.get("leds", []) if 0 <= int(i) < n})
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if not leds:
+            raise HTTPException(400, "No LEDs selected.")
+        try:
+            scan = state.scans.get(m["scan"])
+        except FileNotFoundError:
+            raise HTTPException(404, "The scan this map was built from no longer exists.")
+        kind = _scan_kind(scan)
+        out = {"map": mid, "scan": scan.id, "kind": kind, "leds": leds}
+        if kind == "tripod":
+            anc = rescan.anchors(m, exclude=set(leds))
+            sess = state.session if state.session and state.session.scan.id == scan.id else state.open_session(scan.id)
+            sess.scan.meta["rescan"] = {"map": mid, "leds": leds, "anchors": anc, "capture": sorted(set(leds) | set(anc))}
+            sess.scan.save()
+            out["anchors"] = anc
+        return out
+
+    @app.post("/api/leds/show")
+    def leds_show(body: dict = Body(default={})) -> dict:
+        """Blink a set of LEDs on the tree (e.g. the ones about to be re-scanned)."""
+        n = state.output.led_count
+        leds = sorted({int(i) for i in body.get("leds", []) if 0 <= int(i) < n})
+        if not leds:
+            raise HTTPException(400, "No LEDs given.")
+        state.start_effect("identify", float(body.get("brightness", 0.6)), leds)
+        return {"ok": True, "count": len(leds)}
+
     # ---- walk-around capture (§7.9) -----------------------------------------------------------
     @app.post("/api/scans/{sid}/walk/{vid}/process")
     async def walk_process(sid: str, vid: str, body: dict = Body(default={})) -> dict:
@@ -693,6 +822,21 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
             return
         walk = state.walk
         resume = walk is not None and walk.state == "walking" and hello.get("view") == walk.vid
+        if not resume and hello.get("view") and hello.get("scan"):
+            # The phone was walking when the server stopped: that walk has ended; tell the
+            # phone to upload its recording and process what was captured.
+            try:
+                old = state.scans.get(hello["scan"]).view(hello["view"])
+            except (FileNotFoundError, StopIteration):
+                old = None
+            if old and old.get("mode") == "walk" and old.get("status") == "awaiting_upload":
+                sid, vid = hello["scan"], hello["view"]
+                await send({"type": "welcome", "scan": sid, "view": vid, "n": state.output.led_count,
+                            **walkproto.timing_info(), "resumed": False})
+                await send({"type": "stopped", "scan": sid, "view": vid, "reason": old.get("stop_reason", "ended"),
+                            "upload": f"/api/scans/{sid}/video/{vid}/upload", "process": f"/api/scans/{sid}/walk/{vid}/process"})
+                await ws.close()
+                return
         try:
             if not resume:
                 walk = state.open_walk(hello.get("scan"))
@@ -783,7 +927,20 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
                         delay = float(cmd.get("delay_s", 0))
                         if delay:
                             await asyncio.sleep(min(delay, 10))
-                        sess.start_view(cmd.get("mode", "hybrid"))
+                        mode = cmd.get("mode", "hybrid")
+                        leds = None
+                        if mode == "rescan":
+                            leds = (sess.scan.meta.get("rescan") or {}).get("capture")
+                            if not leds:
+                                raise RuntimeError("No re-scan is set up for this scan. Choose LEDs on the Map page first.")
+                        resume = getattr(sess, "interrupted_view", None)
+                        if resume and mode != "rescan":
+                            # Continue the view the server was capturing when it stopped (§7.6).
+                            sess.interrupted_view = None
+                            view = sess.scan.view(resume)
+                            sess.start_view(view.get("mode", mode), view_id=resume, leds=view.get("leds"))
+                        else:
+                            sess.start_view(mode, leds=leds)
                     elif t == "stop" and state.session:
                         await state.session.stop()
                     elif t == "resume" and state.session:

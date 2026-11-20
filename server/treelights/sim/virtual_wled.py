@@ -47,6 +47,10 @@ class VirtualWled:
         self._last_rx = 0.0
         self.live_ip = ""
         self.boot = time.monotonic()
+        self.state = {"on": True, "bri": 128}  # JSON API state
+        # Real WLED scales realtime data by the master brightness (unless "force max
+        # brightness" is on). Off by default so the other simulations see raw levels.
+        self.apply_bri = False
         self.history_t: list[float] = [time.monotonic()]
         self.history: list[np.ndarray] = [self._shown.copy()]
         self.packets = 0
@@ -106,7 +110,10 @@ class VirtualWled:
             if push:
                 self._seen_push = True
             if push or not self._seen_push:
-                self._record(self._buf.copy())
+                f = self._buf.copy()
+                if self.apply_bri:
+                    f = (f.astype(np.uint16) * int(self.state.get("bri", 255)) // 255).astype(np.uint8)
+                self._record(f)
 
     def datagram_received(self, data: bytes, addr: tuple) -> None:
         self.packets += 1
@@ -141,7 +148,7 @@ class VirtualWled:
 
     def _app(self) -> FastAPI:
         app = FastAPI()
-        state = {"on": True, "bri": 128}
+        state = self.state
         app.get("/json/info")(lambda: self.info())
         app.get("/json/cfg")(lambda: self.cfg())
         app.get("/json/state")(lambda: state)

@@ -109,17 +109,19 @@ class Chase(Effect):
 
 
 class Identify(Effect):
-    """Blink one LED (the rest off)."""
+    """Blink one LED, or a set of them (the rest off)."""
 
     name = "identify"
 
-    def __init__(self, index: int):
-        self.index = index
+    def __init__(self, index: int | list[int]):
+        self.indices = [int(index)] if isinstance(index, (int, np.integer)) else [int(i) for i in index]
+        self.index = self.indices[0] if self.indices else -1
 
     def render(self, t: float, out: np.ndarray) -> None:
         out[:] = 0
-        if 0 <= self.index < len(out) and (t * 2) % 1 < 0.6:
-            out[self.index] = (1, 1, 1)
+        if (t * 2) % 1 < 0.6:
+            idx = [i for i in self.indices if 0 <= i < len(out)]
+            out[idx] = (1, 1, 1)
 
 
 EFFECTS = {"sweep": SweepTest, "status": StatusColors, "chase": Chase}
