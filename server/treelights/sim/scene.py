@@ -36,6 +36,7 @@ class Faults:
     # view-dependent glints. foliage scales the scattered light; 0 disables it.
     foliage: float = 1.0
     glint_prob: float = 0.15
+    shot_noise: float = 1.0
 
 
 @dataclass
@@ -108,10 +109,12 @@ class Scene:
         return u + self.rng.normal(0, 0.005, 3)
 
     def _visibility(self, R_tree: np.ndarray, s_tree: np.ndarray, points: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
-        tree = self.tree
-        P = tree.positions if points is None else points
         # Camera center in the tree frame.
         C = R_tree.T @ (self.eye - s_tree)
+        return self._vis_center(C, self.tree.positions if points is None else points)
+
+    def _vis_center(self, C: np.ndarray, P: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        tree = self.tree
         ts = np.linspace(0.02, 0.98, 40)
         seg = P[None, :, :] * (1 - ts[:, None, None]) + C[None, None, :] * ts[:, None, None]  # toward camera
         r = np.hypot(seg[..., 0], seg[..., 2])
@@ -138,77 +141,114 @@ class Scene:
         return uv if self.faults.foliage else uv + v.glow_offset
 
     def render(self, v: View, leds: np.ndarray) -> np.ndarray:
-        """Render a BGR uint8 image for commanded LED colors (N,3) uint8."""
+        """Render a BGR uint8 image for commanded LED colors (N,3) uint8 (fixed camera, turned tree)."""
         f = self.faults
-        rng = self.rng
         self.frame_no += 1
         if f.bump_at_frame is not None and self.frame_no == f.bump_at_frame:
             ang = f.bump_px / self.intr.f
             self.bump_R = rodrigues(np.array([0.0, ang, ang * 0.3])) @ self.bump_R
+        R, t = self.camera_pose(v)
+        Rc, tc = self.bump_R @ self.R_cam, self.bump_R @ self.t_cam
+        img = self._compose(R, t, leds, v.vis, v.patch_vis, v.glow_offset, int(v.angle * 1000),
+                            (v.R_tree, v.s_tree, Rc, tc), None)
+        return self._finish(img)
+
+    def render_pose(self, R: np.ndarray, t: np.ndarray, leds: np.ndarray, blur_to: tuple | None = None) -> np.ndarray:
+        """Render from any camera pose (tree frame -> camera), e.g. a phone carried around
+        the tree. blur_to: the pose at the end of the exposure, for motion blur."""
+        self.frame_no += 1
+        C = -R.T @ t
+        key = tuple(np.round(C / 2.0).astype(int))  # visibility changes slowly: cache per 2 cm
+        cache = self.__dict__.setdefault("_vis_cache", {})
+        if key not in cache:
+            if len(cache) > 4000:
+                cache.clear()
+            vis, _ = self._vis_center(C, self.tree.positions)
+            pv, _ = self._vis_center(C, self.patch_pos.reshape(-1, 3))
+            cache[key] = (vis, pv.reshape(self.patch_pos.shape[:2]))
+        vis, pv = cache[key]
+        azim = int(round(np.degrees(np.arctan2(C[2], C[0])) / 3.0))  # glints change every few degrees
+        img = self._compose(R, t, leds, vis, pv, np.zeros((self.tree.n, 2)), azim, (np.eye(3), np.zeros(3), R, t), blur_to)
+        return self._finish(img)
+
+    def _finish(self, img: np.ndarray) -> np.ndarray:
+        f, rng = self.faults, self.rng
         if f.exposure_drift:
             self.exposure = float(np.clip(self.exposure * (1 + rng.normal(0, f.exposure_drift)), 0.6, 1.6))
-
-        img = self.background.copy()
-        leds = np.asarray(leds, np.float32)
-        lit = np.nonzero(leds.max(axis=1) > 0)[0]
-        if len(lit):
-            uv, z = self.project_view(v)
-            emit = (leds[lit] / 255.0) @ self.crosstalk.T  # camera RGB response
-            dist_fac = (330.0 / np.maximum(z[lit], 1.0)) ** 2
-            amp = self.led_gain * emit * (v.vis[lit] * dist_fac)[:, None]
-            centers = uv[lit] if f.foliage else uv[lit] + v.glow_offset[lit]
-            full = self.led_gain * emit * dist_fac[:, None]  # unoccluded amplitude
-            if f.foliage and v.patch_vis is not None:
-                R, t = self.camera_pose(v)
-                puv, pz = project(self.patch_pos[lit].reshape(-1, 3), R, t, self.intr)
-                puv = puv.reshape(len(lit), -1, 2)
-                albedo = np.array([0.55, 0.8, 0.45])  # needles are greenish
-                for k, i in enumerate(lit):
-                    if z[i] <= 0:
-                        continue
-                    for j in range(puv.shape[1]):
-                        w = self.patch_w[i, j] * v.patch_vis[i, j] * f.foliage
-                        if w > 0:
-                            self._splat(img, puv[k, j], full[k] * albedo * w, sigma=3.0, halo=0.0)
-                    # Specular glints off needles: sharp, view-dependent, near the LED, and up to
-                    # half as bright as the unoccluded LED (so they can beat a mostly hidden one).
-                    if f.glint_prob and _hash01(i, int(v.angle * 1000), 11) < f.glint_prob:
-                        off = (np.array([_hash01(i, int(v.angle * 1000), 12), _hash01(i, int(v.angle * 1000), 13)]) - 0.5) * 36
-                        off += np.sign(off) * 4
-                        self._splat(img, uv[i] + off, full[k] * (0.1 + 0.4 * _hash01(i, int(v.angle * 1000), 14)), sigma=1.1, halo=0.0)
-            for k, i in enumerate(lit):
-                if v.vis[i] <= 0 or z[i] <= 0:
-                    continue
-                sharp = 0.5 + 0.5 * v.vis[i]
-                self._splat(img, centers[k], amp[k], sigma=1.2 / sharp, halo=0.05 / sharp)
-                if f.glossy_prob and _hash01(i, int(v.angle * 1000), 7) < f.glossy_prob:
-                    off = (np.array([_hash01(i, 1, 9), _hash01(i, 2, 9)]) - 0.5) * 40
-                    self._splat(img, centers[k] + off, amp[k] * 0.35, sigma=1.5, halo=0.02)
-            if f.mirror:
-                R, t = self.camera_pose(v)
-                Xw = (self.tree.positions[lit] @ v.R_tree.T) + v.s_tree  # room frame
-                d = (Xw - self.mirror_p0) @ self.mirror_n
-                Xm = Xw - 2 * d[:, None] * self.mirror_n[None, :]
-                Rc = self.bump_R @ self.R_cam
-                uvm, zm = project(Xm, Rc, self.bump_R @ self.t_cam, self.intr)
-                for k, i in enumerate(lit):
-                    if zm[k] > 0 and v.vis[i] > 0 and d[k] < 0:
-                        self._splat(img, uvm[k], amp[k] * 0.3, sigma=1.6, halo=0.03)
-            # Light from the LEDs brightens the room a little.
-            img += (leds[lit].sum() / 255.0) * 0.004
         if f.person_frames and f.person_frames[0] <= self.frame_no < f.person_frames[1]:
             x0 = int(self.width * 0.3)
-            img[100:700, x0 : x0 + 220] += np.array([40, 45, 55], np.float32)
+            img[int(self.height * 0.14) : int(self.height * 0.97), x0 : x0 + int(self.width * 0.17)] += np.array([40, 45, 55], np.float32)
         if f.tv_flicker:
-            img[40:160, 1050:1230] += rng.uniform(0, 60)
+            img[int(self.height * 0.06) : int(self.height * 0.22), int(self.width * 0.82) : int(self.width * 0.96)] += rng.uniform(0, 60)
         img *= self.exposure
         n1 = self._noise[rng.integers(len(self._noise))]
         n2 = self._noise[rng.integers(len(self._noise))]
         sh = (int(rng.integers(self.height)), int(rng.integers(self.width)))
         img += np.roll(n1, sh, axis=(0, 1)) * f.noise_sigma
-        img += n2 * np.sqrt(np.clip(img, 0, None)) * 0.15
+        img += n2 * np.sqrt(np.clip(img, 0, None)) * 0.15 * f.shot_noise
         rgb = np.clip(img, 0, 255).astype(np.uint8)
         return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+    def _compose(self, R, t, leds, vis, patch_vis, glow_offset, glint_key, mirror_tf, blur_to) -> np.ndarray:
+        f = self.faults
+        img = self.background.copy()
+        leds = np.asarray(leds, np.float32)
+        lit = np.nonzero(leds.max(axis=1) > 0)[0]
+        if not len(lit):
+            return img
+        uv, z = project(self.tree.positions, R, t, self.intr)
+        duv = np.zeros_like(uv)
+        if blur_to is not None:
+            uv2, _ = project(self.tree.positions, blur_to[0], blur_to[1], self.intr)
+            duv = uv2 - uv
+        emit = (leds[lit] / 255.0) @ self.crosstalk.T  # camera RGB response
+        dist_fac = (330.0 / np.maximum(z[lit], 1.0)) ** 2
+        amp = self.led_gain * emit * (vis[lit] * dist_fac)[:, None]
+        centers = uv[lit] if f.foliage else uv[lit] + glow_offset[lit]
+        full = self.led_gain * emit * dist_fac[:, None]  # unoccluded amplitude
+
+        def splat(c, a, sigma, halo, d):
+            nb = 1 if not np.any(d) else int(np.clip(np.ceil(np.hypot(*d) / 1.5), 1, 8))
+            for s_ in range(nb):
+                self._splat(img, c + d * ((s_ + 0.5) / nb), a / nb, sigma=sigma, halo=halo)
+
+        if f.foliage and patch_vis is not None:
+            puv, _pz = project(self.patch_pos[lit].reshape(-1, 3), R, t, self.intr)
+            puv = puv.reshape(len(lit), -1, 2)
+            albedo = np.array([0.55, 0.8, 0.45])  # needles are greenish
+            for k, i in enumerate(lit):
+                if z[i] <= 0:
+                    continue
+                for j in range(puv.shape[1]):
+                    w = self.patch_w[i, j] * patch_vis[i, j] * f.foliage
+                    if w > 0:
+                        splat(puv[k, j], full[k] * albedo * w, 3.0, 0.0, duv[i])
+                # Specular glints off needles: sharp, view-dependent, near the LED, and up to
+                # half as bright as the unoccluded LED (so they can beat a mostly hidden one).
+                if f.glint_prob and _hash01(i, glint_key, 11) < f.glint_prob:
+                    off = (np.array([_hash01(i, glint_key, 12), _hash01(i, glint_key, 13)]) - 0.5) * 36
+                    off += np.sign(off) * 4
+                    splat(uv[i] + off, full[k] * (0.1 + 0.4 * _hash01(i, glint_key, 14)), 1.1, 0.0, duv[i])
+        for k, i in enumerate(lit):
+            if vis[i] <= 0 or z[i] <= 0:
+                continue
+            sharp = 0.5 + 0.5 * vis[i]
+            splat(centers[k], amp[k], 1.2 / sharp, 0.05 / sharp, duv[i])
+            if f.glossy_prob and _hash01(i, glint_key, 7) < f.glossy_prob:
+                off = (np.array([_hash01(i, 1, 9), _hash01(i, 2, 9)]) - 0.5) * 40
+                splat(centers[k] + off, amp[k] * 0.35, 1.5, 0.02, duv[i])
+        if f.mirror:
+            R_tree, s_tree, Rc, tc = mirror_tf
+            Xw = (self.tree.positions[lit] @ R_tree.T) + s_tree  # room frame
+            d = (Xw - self.mirror_p0) @ self.mirror_n
+            Xm = Xw - 2 * d[:, None] * self.mirror_n[None, :]
+            uvm, zm = project(Xm, Rc, tc, self.intr)
+            for k, i in enumerate(lit):
+                if zm[k] > 0 and vis[i] > 0 and d[k] < 0:
+                    self._splat(img, uvm[k], amp[k] * 0.3, sigma=1.6, halo=0.03)
+        # Light from the LEDs brightens the room a little.
+        img += (leds[lit].sum() / 255.0) * 0.004
+        return img
 
     def _splat(self, img: np.ndarray, c: np.ndarray, amp: np.ndarray, sigma: float, halo: float) -> None:
         R = 18

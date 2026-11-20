@@ -154,53 +154,113 @@ def collect_pairs(rows: np.ndarray, frame_t: np.ndarray, max_dt: float = 0.1, mi
     return out
 
 
+def collect_long_pairs(rows: np.ndarray, frame_t: np.ndarray, gap_s: float = 1.0, step_s: float = 0.5,
+                       min_common: int = 25, max_pairs: int = 60):
+    """Frame pairs about gap_s apart (every step_s) with the positions of tracks seen in both."""
+    by_frame: dict[int, dict[int, np.ndarray]] = {}
+    for r in rows:
+        by_frame.setdefault(int(r[1]), {})[int(r[0])] = r[2:4]
+    frames = np.array(sorted(by_frame))
+    if len(frames) < 2:
+        return []
+    ft = frame_t[frames]
+    out, next_t = [], ft[0]
+    for k, a in enumerate(frames):
+        if ft[k] < next_t:
+            continue
+        j = int(np.searchsorted(ft, ft[k] + gap_s))
+        if j >= len(frames) or abs(ft[j] - ft[k] - gap_s) > 0.2:
+            continue
+        b = frames[j]
+        common = sorted(set(by_frame[a]) & set(by_frame[b]))
+        if len(common) < min_common:
+            continue
+        out.append((int(a), int(b), np.array([by_frame[a][i] for i in common]), np.array([by_frame[b][i] for i in common])))
+        next_t = ft[k] + step_s
+        if len(out) >= max_pairs:
+            break
+    return out
+
+
+def _image_rotations(pairs, f: float, cx: float, cy: float) -> list:
+    """Relative rotation of each pair from the image alone (essential matrix: handles the
+    walking translation), or None where it can't be estimated."""
+    import cv2
+
+    out = []
+    for _a, _b, p, q in pairs:
+        pa = (p - [cx, cy]) / f
+        pb = (q - [cx, cy]) / f
+        E, mask = cv2.findEssentialMat(pa, pb, np.eye(3), method=cv2.RANSAC, prob=0.999, threshold=1.5 / f)
+        if E is None or E.shape != (3, 3):
+            out.append(None)
+            continue
+        n_in, R, _t, _m = cv2.recoverPose(E, pa, pb, np.eye(3), mask=mask)
+        out.append(R if n_in >= 0.6 * len(pa) else None)
+    return out
+
+
+def _angle_deg(R: np.ndarray) -> float:
+    return float(np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))))
+
+
 def calibrate(rows: np.ndarray, frame_t: np.ndarray, log_t: np.ndarray, log_q: np.ndarray, width: int, height: int,
               f_prior: float | None = None) -> GyroModel:
-    """Choose the device->camera mapping, focal length and time offset that best predict
-    tracked LED motion between consecutive frames."""
+    """Choose the device->camera mapping, focal length and time offset under which the
+    sensor's rotations agree with rotations estimated from the images.
+
+    Image rotations come from essential matrices between frames ~1 s apart, so the
+    walking translation (which cancels much of the rotation's image motion when the
+    phone stays pointed at the tree) doesn't confuse the comparison."""
     size = max(width, height)
     cx, cy = (width - 1) / 2, (height - 1) / 2
-    pairs = collect_pairs(rows, frame_t)
     none = GyroModel(DEFAULT_M, False, f_prior or 0.7 * size, 0.0, np.inf, np.inf, False, size)
-    if len(pairs) < 10 or len(log_t) < 10:
+    pairs = collect_long_pairs(rows, frame_t)
+    if len(pairs) < 6 or log_t is None or len(log_t) < 10:
         return none
     used = sorted({i for a, b, _p, _q in pairs for i in (a, b)})
 
-    def Kf(f: float) -> np.ndarray:
-        return np.array([[f, 0, cx], [0, f, cy], [0, 0, 1.0]])
-
-    def rotations(M, inverse, delta):
+    def sensor(delta: float) -> dict[int, np.ndarray]:
         q = slerp_log(log_t, log_q, frame_t[used] + delta)
-        Rs = {}
-        for i, qq in zip(used, q):
-            Rd = quat_to_R(qq)
-            Rs[i] = M @ (Rd if inverse else Rd.T)
-        return Rs
+        return {i: quat_to_R(qq) for i, qq in zip(used, q)}
 
-    eye = {i: np.eye(3) for i in used}
-    baseline = _pairs_score(pairs, eye, Kf(0.7 * size))
+    def score(img_R, Rd, M, inverse) -> float:
+        diffs = []
+        for (a, b, _p, _q), Ri in zip(pairs, img_R):
+            if Ri is None:
+                continue
+            Ra = M @ (Rd[a] if inverse else Rd[a].T)
+            Rb = M @ (Rd[b] if inverse else Rd[b].T)
+            diffs.append(_angle_deg(Ri.T @ (Rb @ Ra.T)))
+        return float(np.median(diffs)) if len(diffs) >= 4 else np.inf
+
     f_grid = [f_prior] if f_prior else list(size * np.array([0.45, 0.55, 0.65, 0.75, 0.9, 1.1, 1.35]))
+    Rd0 = sensor(0.0)
     best = (np.inf, None)
-    for inverse in (False, True):
-        for M in CANDIDATES:
-            Rs = rotations(M, inverse, 0.0)
-            for f in f_grid:
-                s = _pairs_score(pairs, Rs, Kf(f))
-                if s < best[0]:
-                    best = (s, (M, inverse, f))
-    _s, (M, inverse, f) = best
-    # Refine focal length and time offset for the chosen mapping.
-    best_s, best_f, best_d = best[0], f, 0.0
-    for delta in np.arange(-0.1, 0.1001, 0.01):
-        Rs = rotations(M, inverse, float(delta))
-        for ff in f * np.array([0.85, 0.92, 1.0, 1.08, 1.17]) if not f_prior else [f]:
-            s = _pairs_score(pairs, Rs, Kf(ff))
-            if s < best_s:
-                best_s, best_f, best_d = s, ff, float(delta)
-    Rs = rotations(M, inverse, best_d)
-    for ff in best_f * np.linspace(0.94, 1.06, 13) if not f_prior else [best_f]:
-        s = _pairs_score(pairs, Rs, Kf(ff))
-        if s < best_s:
-            best_s, best_f = s, ff
-    ok = bool(best_s < 3.0 and best_s < 0.6 * baseline)
-    return GyroModel(M, inverse, float(best_f), best_d, best_s, baseline, ok, size)
+    img_cache = {}
+    for f in f_grid:
+        img_cache[f] = _image_rotations(pairs, f, cx, cy)
+        for inverse in (False, True):
+            for M in CANDIDATES:
+                sc = score(img_cache[f], Rd0, M, inverse)
+                if sc < best[0]:
+                    best = (sc, (M, inverse, f))
+    if best[1] is None:
+        return none
+    s0, (M, inverse, f) = best
+    if not f_prior:
+        for ff in f * np.array([0.88, 0.94, 1.06, 1.12]):
+            img_cache[ff] = _image_rotations(pairs, ff, cx, cy)
+            sc = score(img_cache[ff], Rd0, M, inverse)
+            if sc < s0:
+                s0, f = sc, ff
+    best_d = 0.0
+    for delta in np.arange(-0.1, 0.1001, 0.02):
+        sc = score(img_cache[f], sensor(float(delta)), M, inverse)
+        if sc < s0 - 1e-6:
+            s0, best_d = sc, float(delta)
+    # Baseline: how much the camera actually rotated (vs. claiming no rotation).
+    base = [(_angle_deg(Ri)) for Ri in img_cache[f] if Ri is not None]
+    baseline = float(np.median(base)) if base else 0.0
+    ok = bool(s0 < 1.5 and baseline > 2.5 * s0 and baseline > 2.0)
+    return GyroModel(M, inverse, float(f), best_d, s0, baseline, ok, size)

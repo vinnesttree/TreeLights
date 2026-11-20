@@ -26,18 +26,28 @@ def normalize(t: np.ndarray, flux: np.ndarray) -> np.ndarray:
     hi_i = np.searchsorted(t, t + WINDOW_S)
     for k in range(len(t)):
         w = flux[lo_i[k] : hi_i[k]]
-        lo, hi = np.percentile(w, 5), np.percentile(w, 95)
+        # Sync "off" and "all bright" slots are each only ~1/18 of frames: use the extremes.
+        lo, hi = np.percentile(w, 1), np.percentile(w, 99)
         out[k] = (flux[k] - lo) / (hi - lo) if hi - lo > 1e-6 else 0.5
     return np.clip(out, -0.5, 1.5)
 
 
 def _cost(t: np.ndarray, r: np.ndarray, offset: np.ndarray) -> np.ndarray:
-    """Mean squared mismatch for each candidate offset (vectorized over offsets)."""
+    """Mean squared mismatch for each candidate offset (vectorized over offsets).
+
+    Sync slots are fixed at 1 (all bright) and 0 (off); the level of code slots is
+    fitted per offset, because bright LEDs saturating in the camera lose flux and
+    move it away from the nominal (1 + DIM) / 2."""
     u = (t[None, :] - offset[:, None]) / T_SLOT
     k = np.floor(u).astype(int)
     ph = u - k
     w = ((ph > EDGE) & (ph < 1 - EDGE)).astype(float)
     pred = template(k)
+    code = (pred > 0.01) & (pred < 0.99)
+    wc = w * code
+    level = (wc * r[None, :]).sum(axis=1) / np.maximum(wc.sum(axis=1), 1)
+    level = np.clip(level, 0.3, 0.95)
+    pred = np.where(code, level[:, None], pred)
     return (w * (r[None, :] - pred) ** 2).sum(axis=1) / np.maximum(w.sum(axis=1), 1)
 
 
@@ -72,7 +82,8 @@ def estimate(t: np.ndarray, flux: np.ndarray) -> Timing:
     grid = np.arange(0.0, CYCLE_T, 0.005)
     cost = np.concatenate([_cost(t, r, g) for g in np.array_split(grid, max(1, len(grid) // 60))])
     best = float(grid[np.argmin(cost)])
-    contrast = float(cost.min() / max(np.median(cost), 1e-9))
+    typical = max(float(np.median(cost)), 1e-9)
+    contrast = float(cost.min() / typical)
     # Per-cycle refinement (drift, latency changes).
     pts = []
     c0 = int(np.floor((t[0] - best) / CYCLE_T))
@@ -83,16 +94,22 @@ def estimate(t: np.ndarray, flux: np.ndarray) -> Timing:
             continue
         local = best + np.arange(-0.08, 0.0801, 0.005)
         lc = _cost(t[sel], r[sel], local)
-        if lc.min() < 0.5 * max(np.median(lc), 1e-9) or lc.min() < 0.02:
+        if lc.min() < 0.5 * typical:
             pts.append((float(t[sel].mean()), float(local[np.argmin(lc)])))
-    if len(pts) >= 2:
+    a, b = best, 0.0
+    if pts:
         P = np.array(pts)
-        b, a = np.polyfit(P[:, 0], P[:, 1], 1)
-        resid = np.abs(P[:, 1] - (a + b * P[:, 0]))
-        keep = resid < 0.03
-        if keep.sum() >= 2:
-            b, a = np.polyfit(P[keep, 0], P[keep, 1], 1)
-    else:
-        a, b = best, 0.0
+        a = float(np.median(P[:, 1]))
+        if len(P) >= 4:
+            # Clock drift between phone and server is tiny (well under 0.1%); a larger
+            # slope would be fitting noise.
+            b_fit, a_fit = np.polyfit(P[:, 0], P[:, 1], 1)
+            if abs(b_fit) <= 0.001:
+                resid = np.abs(P[:, 1] - (a_fit + b_fit * P[:, 0]))
+                keep = resid < 0.03
+                if keep.sum() >= 4:
+                    b_fit, a_fit = np.polyfit(P[keep, 0], P[keep, 1], 1)
+                    if abs(b_fit) <= 0.001:
+                        a, b = float(a_fit), float(b_fit)
     ok = contrast < 0.4 and len(pts) >= 1
     return Timing(float(a), float(b), contrast, len(pts), bool(ok))

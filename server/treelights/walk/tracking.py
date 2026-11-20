@@ -23,6 +23,12 @@ GATE_PX = 5.0
 VOTE_GATE_GYRO = 25.0
 VOTE_GATE_NOGYRO = 70.0
 MAX_COAST_S = 0.6
+MAX_DEVIATION_PX = 8.0
+LOCK_FRAMES = 3
+SHIFT_ALPHA = 0.3
+MAX_LOST_S = 2.0
+REACQUIRE_PX_PER_S = 5.0
+REACQUIRE_MAX_PX = 15.0
 VEL_ALPHA = 0.3
 
 
@@ -82,81 +88,141 @@ def _vote_shift(pred: np.ndarray, blobs: np.ndarray, gate: float) -> tuple[np.nd
     Hs2 = Hs.copy()
     Hs2[:, 1:] += Hs[:, :-1]
     Hs2[:, :-1] += Hs[:, 1:]
-    ix, iy = np.unravel_index(np.argmax(Hs2), Hs2.shape)
-    c = np.array([edges[ix] + 1.0, edges[iy] + 1.0])
+    # Strong peaks (>= 70% of the best) compete; the one nearest zero motion wins, since a
+    # lattice of LEDs also produces peaks at multiples of the LED spacing.
+    centers = edges[:-1] + 1.0
+    strong = np.argwhere(Hs2 >= 0.7 * Hs2.max())
+    mag = np.hypot(centers[strong[:, 0]], centers[strong[:, 1]])
+    ix, iy = strong[int(np.argmin(mag))]
+    c = np.array([centers[ix], centers[iy]])
     near = np.abs(d - c).max(axis=1) <= 3.0
     if not near.any():
         return np.zeros(2), 0
     return d[near].mean(axis=0), int(near.sum())
 
 
+def _greedy_match(pred: np.ndarray, pts: np.ndarray, gate: np.ndarray | float) -> tuple[np.ndarray, np.ndarray]:
+    """One-to-one nearest matching within a gate (scalar or per prediction)."""
+    mt = np.full(len(pred), -1)
+    mb = np.full(len(pts), -1)
+    if not len(pred) or not len(pts):
+        return mt, mb
+    g = np.broadcast_to(np.asarray(gate, float), (len(pred),))
+    dist, j = cKDTree(pts).query(pred, k=2, distance_upper_bound=float(g.max()))
+    cand = [(dist[i, kk], i, int(j[i, kk])) for i in range(len(pred)) for kk in range(2)
+            if np.isfinite(dist[i, kk]) and dist[i, kk] <= g[i]]
+    cand.sort()
+    for _d, i, jj in cand:
+        if mt[i] < 0 and mb[jj] < 0:
+            mt[i], mb[jj] = jj, i
+    return mt, mb
+
+
 def track(frames: list[Frame], K: np.ndarray | None = None, use_gyro: bool = True) -> TrackSet:
-    """frames must be sorted by time."""
-    pos = np.zeros((0, 2))
-    vel = np.zeros((0, 2))
-    last = np.zeros(0)
-    ids = np.zeros(0, int)
+    """frames must be sorted by time.
+
+    Lost tracks (not seen for MAX_COAST_S, e.g. hidden behind a branch) keep being
+    predicted for up to MAX_LOST_S and can be re-acquired within a gate that grows with
+    the gap: an LED is then one long track, which is what decoding needs (a full code
+    cycle is 7.2 s). A wrong re-acquisition gives conflicting bit votes and the track
+    is rejected by the decoder rather than mislabelled."""
+    pos = np.zeros((0, 2)); vel = np.zeros((0, 2)); last = np.zeros(0); ids = np.zeros(0, int)  # noqa: E702
+    lpos = np.zeros((0, 2)); lvel = np.zeros((0, 2)); llast = np.zeros(0); lids = np.zeros(0, int)  # noqa: E702
     next_id = 0
     rows = []
     shifts = np.zeros((len(frames), 2))
+    shift_rate = np.zeros(2)  # px/s of motion not explained by the gyro
+    lock = 0
     prev = None
     for fi, fr in enumerate(frames):
         b = fr.blobs
         bxy = b[:, [X, Y]].astype(float) if len(b) else np.zeros((0, 2))
         gyro = use_gyro and K is not None and fr.R is not None and prev is not None and prev.R is not None
-        if prev is not None and len(pos):
-            dt = fr.t - prev.t
-            base = apply_h(rotation_homography(prev.R, fr.R, K), pos) if gyro else pos.copy()
-            pred = base + vel * dt
-            s, votes = _vote_shift(pred, bxy, VOTE_GATE_GYRO if gyro else VOTE_GATE_NOGYRO)
+        dt = fr.t - prev.t if prev is not None else 0.0
+        H = rotation_homography(prev.R, fr.R, K) if gyro else None
+
+        def move(p, v):
+            base = apply_h(H, p) if H is not None else p.copy()
+            return base, base + v * dt
+
+        base, pred = move(pos, vel)
+        lbase, lpred = move(lpos, lvel)
+        if prev is not None and len(pred):
+            # The motion the gyro doesn't explain (walking translation) changes smoothly:
+            # start from the expected shift and correct around it. The vote takes the strong
+            # peak nearest the expectation, and a large deviation is rejected: that is the
+            # vote locking onto the LED lattice (every track moved onto its neighbour), which
+            # happens most after the sync "off" slots when all tracks have coasted.
+            # Walking around the tree while keeping it in view, the camera's rotation and its
+            # translation largely cancel for LEDs near the tree, so the gyro's rotation alone
+            # over-predicts their motion. Until that offset is learned (lock), vote wide.
+            expected = shift_rate * dt
+            pred, base, lpred, lbase = pred + expected, base + expected, lpred + expected, lbase + expected
+            locked = gyro and lock >= LOCK_FRAMES
+            s, votes = _vote_shift(pred, bxy, VOTE_GATE_GYRO if locked else VOTE_GATE_NOGYRO)
+            if locked and np.hypot(*s) > MAX_DEVIATION_PX + 0.3 * np.hypot(*expected):
+                votes = 0  # the vote locked onto the LED lattice
             if votes >= 3:
-                pred = pred + s
-                base = base + s
-                shifts[fi] = s
-        else:
-            pred = pos.copy()
-            base = pos.copy()
-            dt = 0.0
-        matched_t = np.full(len(pos), -1)
-        matched_b = np.full(len(bxy), -1)
-        if len(pos) and len(bxy):
-            tree = cKDTree(bxy)
-            dist, j = tree.query(pred, k=2, distance_upper_bound=GATE_PX)
-            cand = []
-            for i in range(len(pred)):
-                for kk in range(2):
-                    if np.isfinite(dist[i, kk]):
-                        cand.append((dist[i, kk], i, int(j[i, kk])))
-            cand.sort()
-            for _d, i, jj in cand:
-                if matched_t[i] < 0 and matched_b[jj] < 0:
-                    matched_t[i] = jj
-                    matched_b[jj] = i
-        # Update matched tracks.
-        m = matched_t >= 0
+                pred, base, lpred, lbase = pred + s, base + s, lpred + s, lbase + s
+                if dt > 0:
+                    rate = (expected + s) / dt
+                    shift_rate = rate if lock == 0 else (1 - SHIFT_ALPHA) * shift_rate + SHIFT_ALPHA * rate
+                lock += 1
+            else:
+                lock = 0
+            shifts[fi] = expected + (s if votes >= 3 else 0)
+        mt, mb = _greedy_match(pred, bxy, GATE_PX)
+        m = mt >= 0
         if m.any():
-            new = bxy[matched_t[m]]
+            new = bxy[mt[m]]
             if dt > 0:
                 vel[m] = (1 - VEL_ALPHA) * vel[m] + VEL_ALPHA * (new - base[m]) / dt
             pos[m] = new
             last[m] = fr.t
             for i in np.nonzero(m)[0]:
-                bb = b[matched_t[i]]
+                bb = b[mt[i]]
                 rows.append((ids[i], fi, bb[X], bb[Y], bb[FLUX], bb[SHARP], bb[SAT]))
         pos[~m] = pred[~m]
-        # Drop stale tracks.
-        alive = (fr.t - last) <= MAX_COAST_S
-        pos, vel, last, ids = pos[alive], vel[alive], last[alive], ids[alive]
-        # New tracks for unmatched blobs.
-        nb = np.nonzero(matched_b < 0)[0]
-        if len(nb):
-            pos = np.vstack([pos, bxy[nb]])
-            vel = np.vstack([vel, np.zeros((len(nb), 2))])
-            last = np.concatenate([last, np.full(len(nb), fr.t)])
-            new_ids = np.arange(next_id, next_id + len(nb))
-            next_id += len(nb)
+        lpos = lpred
+        # Unmatched blobs: re-acquire lost tracks before starting new ones.
+        free = np.nonzero(mb < 0)[0]
+        if len(free) and len(lpos):
+            gate = np.minimum(GATE_PX + REACQUIRE_PX_PER_S * (fr.t - llast), REACQUIRE_MAX_PX)
+            lt, lb = _greedy_match(lpos, bxy[free], gate)
+            back = np.nonzero(lt >= 0)[0]
+            if len(back):
+                jj = free[lt[back]]
+                pos = np.vstack([pos, bxy[jj]])
+                vel = np.vstack([vel, lvel[back]])
+                last = np.concatenate([last, np.full(len(back), fr.t)])
+                ids = np.concatenate([ids, lids[back]])
+                for i, j in zip(back, jj):
+                    bb = b[j]
+                    rows.append((lids[i], fi, bb[X], bb[Y], bb[FLUX], bb[SHARP], bb[SAT]))
+                keep = np.ones(len(lpos), bool)
+                keep[back] = False
+                lpos, lvel, llast, lids = lpos[keep], lvel[keep], llast[keep], lids[keep]
+                taken = np.zeros(len(bxy), bool)
+                taken[jj] = True
+                free = np.array([f for f in free if not taken[f]], int)
+        # Live tracks unseen too long become lost; lost tracks expire.
+        stale = (fr.t - last) > MAX_COAST_S
+        if stale.any():
+            lpos = np.vstack([lpos, pos[stale]])
+            lvel = np.vstack([lvel, vel[stale]])
+            llast = np.concatenate([llast, last[stale]])
+            lids = np.concatenate([lids, ids[stale]])
+            pos, vel, last, ids = pos[~stale], vel[~stale], last[~stale], ids[~stale]
+        alive = (fr.t - llast) <= MAX_LOST_S
+        lpos, lvel, llast, lids = lpos[alive], lvel[alive], llast[alive], lids[alive]
+        if len(free):
+            pos = np.vstack([pos, bxy[free]])
+            vel = np.vstack([vel, np.zeros((len(free), 2))])
+            last = np.concatenate([last, np.full(len(free), fr.t)])
+            new_ids = np.arange(next_id, next_id + len(free))
+            next_id += len(free)
             ids = np.concatenate([ids, new_ids])
-            for k, jj in enumerate(nb):
+            for k, jj in enumerate(free):
                 bb = b[jj]
                 rows.append((new_ids[k], fi, bb[X], bb[Y], bb[FLUX], bb[SHARP], bb[SAT]))
         prev = fr

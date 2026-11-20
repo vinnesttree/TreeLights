@@ -20,7 +20,7 @@ import numpy as np
 
 from . import gyro as gyromod
 from .blobs import FLUX
-from .decode import Identity, decode_tracks
+from .decode import Identity, decode_tracks, identity_at
 from .pattern import CYCLE_T
 from .timing import Timing, estimate
 from .tracking import Frame, TrackSet, track
@@ -45,7 +45,7 @@ class SourceResult:
     source: Source
     timing: Timing
     tracks: TrackSet
-    ids: dict[int, Identity]
+    ids: dict[int, list[Identity]]
     gyro: gyromod.GyroModel | None
     notes: list[str] = field(default_factory=list)
 
@@ -53,13 +53,28 @@ class SourceResult:
     def frame_t(self) -> np.ndarray:
         return np.array([f.t for f in self.source.frames])
 
+    def identity(self, track_id: int, frame_index: int) -> Identity | None:
+        """The LED a track's detection in a frame belongs to (tracks can change LED)."""
+        ids = self.ids.get(track_id)
+        if not ids:
+            return None
+        return identity_at(ids, float(self.timing.pattern_time(self.source.frames[frame_index].t)))
+
+    def decoded_leds(self) -> set[int]:
+        return {i.index for lst in self.ids.values() for i in lst}
+
 
 def process_source(src: Source, n_leds: int, log_t: np.ndarray | None, log_q: np.ndarray | None,
-                   gyro_model: gyromod.GyroModel | None = None, f_prior: float | None = None) -> SourceResult:
+                   gyro_model: gyromod.GyroModel | None = None, f_prior: float | None = None,
+                   phone_time_fn=None) -> SourceResult:
+    """phone_time_fn(t, timing) -> phone-clock times, for sources (the video) whose frames
+    don't carry phone time; called once the source's own pattern timing is known."""
     frames = src.frames
     t = np.array([f.t for f in frames])
     flux = np.array([float(f.blobs[:, FLUX].sum()) if len(f.blobs) else 0.0 for f in frames])
     timing = estimate(t, flux)
+    if src.phone_t is None and phone_time_fn is not None:
+        src.phone_t = phone_time_fn(t, timing)
     notes = []
     if not timing.ok:
         notes.append(f"{src.name}: the LED pattern wasn't found in the frames.")
@@ -108,7 +123,7 @@ def identified_detections(res: SourceResult) -> dict[int, list[tuple]]:
     """frame index -> [(led, x, y, flux, sharp)]"""
     out: dict[int, list[tuple]] = {}
     for r in res.tracks.rows:
-        ident = res.ids.get(int(r[0]))
+        ident = res.identity(int(r[0]), int(r[1]))
         if ident is None:
             continue
         out.setdefault(int(r[1]), []).append((ident.index, r[2], r[3], r[4], r[5]))
@@ -187,7 +202,10 @@ def build_observations(results: list[SourceResult]) -> tuple[dict, dict, dict]:
 
 
 def focal_prior(results: list[SourceResult]) -> float | None:
-    for res in results:
-        if res.gyro is not None:
-            return res.gyro.f / (res.gyro.size or max(res.source.width, res.source.height))
-    return None
+    """Prefer the video's calibration (more frames, full frame rate), then the best residual."""
+    cands = [r for r in results if r.gyro is not None]
+    if not cands:
+        return None
+    cands.sort(key=lambda r: (r.source.name != "video", r.gyro.residual_px))
+    g = cands[0].gyro
+    return g.f / (g.size or max(cands[0].source.width, cands[0].source.height))
