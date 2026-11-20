@@ -119,8 +119,12 @@ def solve(inp: SolveInput, progress=lambda msg: None) -> dict:
         return n_point >= 2 and h.nerr < 1.0 and h.angle_deg >= 20
 
     def dominant(lst: list[hyp.Hypothesis], tier: int) -> bool:
+        # Clearly better than any alternative: alternatives are often weak 2-view pairings
+        # of glints or reflections, so more supporting views is decisive as well as cost.
         h0 = lst[0]
-        return strong(h0, tier) and (len(lst) == 1 or lst[1].cost > h0.cost + 1.5)
+        if not strong(h0, tier):
+            return False
+        return len(lst) == 1 or lst[1].cost > h0.cost + 1.0 or h0.n - lst[1].n >= 2
 
     def links_in(t: set[int]) -> int:
         return sum(1 for i in t if i + 1 in t)
@@ -136,9 +140,17 @@ def solve(inp: SolveInput, progress=lambda msg: None) -> dict:
     bounds = None
     selected: dict[int, int] = {}
     support: dict[int, list] = {}
+    # Strong, dominant hypotheses stay evidence for learning the bounds even if a round of
+    # chain selection drops them: a connector that wasn't learned yet makes the chain drop
+    # one of its LEDs, and without this the connector could never be learned afterwards.
+    strong_best = {i: lst[0] for i, lst in hyps.items() if dominant(lst, tier)}
     for it in range(3):
         progress(f"Selecting the chain (round {it + 1})...")
-        bounds = chain.learn_bounds(n, sel_pos, sigma, trusted, H_world, inp.output_breaks, user)
+        learn_pos = {i: h.X for i, h in strong_best.items()}
+        learn_pos.update(sel_pos)
+        learn_sigma = {i: h.sigma for i, h in strong_best.items()}
+        learn_sigma.update(sigma)
+        bounds = chain.learn_bounds(n, learn_pos, learn_sigma, trusted | set(strong_best), H_world, inp.output_breaks, user)
         nodes = {i: [chain.Node(h.X, h.sigma, h.cost) for h in lst] for i, lst in hyps.items()}
         selected = chain.select_chain(n, nodes, bounds)
         sel_pos = {i: hyps[i][k].X for i, k in selected.items()}

@@ -64,6 +64,11 @@ docker compose -f docker/docker-compose.yml logs treelights   # shows the URL an
 
 - **Captures check themselves.** A rotating color per step, exactly one new blob, never where a recent LED was, and a sanity check on the frame. A lost UDP packet or a slow camera gives a rejected frame, never a wrong LED identity.
 - **Fast first pass.** All LEDs blink Hamming-coded indices, and every decoded index is spot-checked. One-at-a-time capture fills the gaps.
+- **Branches are expected.** An LED behind needles, the light it scatters onto nearby branches, and glints off needles are all handled.
+  - Each blob is classed as a point source or diffuse, and carries its own uncertainty.
+  - Dim reflections next to a bright LED are dropped.
+  - A glint brighter than a mostly hidden LED is kept *alongside* the LED. Glints move between views, so the multi-view fit rejects them.
+  - LEDs the fast pass only saw as scattered light get a clean one-LED frame.
 - **Movement is caught.** Phone or tree movement is detected by the motion sensors and a reference constellation of LEDs. It starts a new camera segment instead of corrupting data.
 - **Positions are solved as a whole.** Camera positions, focal length and distortion are solved from the LEDs themselves. Each LED keeps several candidate positions until the chain decides.
 - **The distance limit learns itself.** The maximum distance between consecutive LEDs is learned from the data: a normal bound, longer connector links (found even when they repeat every *n* LEDs), and breaks between outputs. It is solved exactly with a shortest path along the chain.
@@ -83,6 +88,10 @@ cd web && npm ci && npm run build                         # web app -> web/dist
 # Run locally without TLS, then drive it with the simulated rig (virtual WLED + phone + turning tree):
 cd server && ../.venv/bin/python -m treelights --data /tmp/tl --web ../web/dist --no-tls --https-port 18443
 ../.venv/bin/python -m treelights.sim.rig --server http://127.0.0.1:18443 --n 600 --views 8
+
+# Detection and full-pipeline accuracy with branch occlusion, scattered light and needle glints:
+PYTHONPATH=. ../.venv/bin/python tools/occlusion_report.py      # per-LED detection vs ground truth
+PYTHONPATH=. ../.venv/bin/python tools/foliage_e2e.py 1         # capture + solve, errors in cm
 ```
 
 Layout:
@@ -107,6 +116,6 @@ Layout:
 | Realtime check fails | WLED Sync settings: *Receive UDP realtime* on. Nothing else (Home Assistant, xLights, another sender) should be streaming to WLED. |
 | Many rejected frames, wait time keeps growing | Weak WiFi. Put the phone on 5 GHz if possible, and move the router or the ESP32 closer. |
 | "The picture keeps moving" | Check the tripod. Let the tree settle after turning it. Keep people and pets out of the picture. |
-| Few LEDs measured | Add views, especially from directions the guidance suggests. Dim the room. Make sure the whole tree is in the picture. |
+| Few LEDs measured | Add views, especially from directions the guidance suggests. Dim the room. Make sure the whole tree is in the picture. LEDs deep inside the branches may only be seen from one side; they're placed from the wiring and marked *single view* or *estimated*. |
 | "LEDs N–M were never seen" | WLED's LED count may be larger than the string, or those LEDs aren't connected. |
 | Map looks upside down or tilted | The report lists which "up" estimates disagree. Re-solve after adding views. |

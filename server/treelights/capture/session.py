@@ -598,19 +598,27 @@ class CaptureSession:
                       "kind": r["kind"], "sigma_px": r["sigma_px"]} for r, st in zip(rs, strength)]
             cands.sort(key=lambda c: -c["score"])
             self.scan.record({"segment": seg.id, "view": vid, "led": led, "kind": "binary", "step": step, "candidates": cands})
-        # Spot-check: a few decoded LEDs lit one at a time must appear where they were decoded.
-        good = [led for led, rs in by_led.items() if len(rs) == 1 and rs[0]["reliability"] >= 0.5]
+        # Spot-check: a few decoded LEDs are lit one at a time; each decoded position must
+        # then be lit. (Checked at the pixel level: a decoded reflection off a branch is
+        # lit too, though the detector may not list it as a candidate.)
+        good = [led for led, rs in by_led.items()
+                if any(r["kind"] == "point" and r["reliability"] >= 0.5 for r in rs)]
         sample = list(self.rng.choice(good, size=min(10, len(good)), replace=False)) if good else []
         mismatches = 0
         self._emit(phase="spot_check", message="Spot-checking decoded LEDs...")
         for led in sample:
+            step_cls = self._step % 3
             res = await self._capture_led(vid, int(led), kind="spot")
-            if res and res["candidates"]:
-                # Any blob of the single-LED frame may match: a glint off a nearby branch can
-                # outshine a partly hidden LED. A wrong decode leaves nothing at that position.
-                d = by_led[int(led)][0]
-                if not any(np.hypot(c["x"] - d["x"], c["y"] - d["y"]) <= 2.5 for c in res["candidates"]):
+            if res is None:
+                continue  # frame rejected (stale, scene change): inconclusive
+            path = str(self.scan.frame_path(seg.id, res["step"], "led"))
+            expected = self.cal.basis[step_cls].tolist() if self.cal.color_verify else None
+            for r in by_led[int(led)]:
+                snr = await self._offload(work.lit_at, path, self.seg.ref_path, r["x"], r["y"], expected)
+                if snr < 5.0:
                     mismatches += 1
+                    self.scan.events.append({"type": "spot_mismatch", "led": int(led), "x": r["x"], "y": r["y"], "snr": snr})
+                    break
         if mismatches:
             self._warn("Binary results failed the spot-check; capturing this view one LED at a time.")
             self.scan.events.append({"type": "binary_discarded", "segment": seg.id, "reason": "spot_check", "mismatches": mismatches})

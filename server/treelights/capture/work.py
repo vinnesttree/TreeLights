@@ -96,3 +96,22 @@ def binary_decode(ref_path: str, allon: list[str], n_leds: int, pairs: dict[int,
         if not chk.ok:
             raise RuntimeError(f"bit {bit} pair no longer consistent: {chk.reason}")
     return dec.result()
+
+
+def lit_at(frame_path: str, ref_path: str, x: float, y: float, expected_color: list[float] | None) -> float:
+    """SNR of the light at (x, y) in a frame (dark-subtracted, projected on the expected
+    color, best of a 5x5 neighbourhood). Used by the binary spot-check: with only one LED
+    lit, a correctly decoded position (the LED or one of its reflections) is lit; a
+    wrong decode points at another LED's position, which stays dark."""
+    import cv2
+
+    from ..detection.detector import project_color, robust_sigma
+
+    ref = load_ref(ref_path)
+    diff = _img(frame_path).astype(np.float32) - ref.image
+    D = cv2.GaussianBlur(project_color(diff, None if expected_color is None else np.array(expected_color)), (0, 0), 1.0)
+    sigma = max(robust_sigma(D), 0.3)
+    h, w = D.shape
+    xi, yi = int(round(x)), int(round(y))
+    win = D[max(0, yi - 2) : min(h, yi + 3), max(0, xi - 2) : min(w, xi + 3)]
+    return float((win.max() - float(np.median(D[::4, ::4]))) / sigma) if win.size else 0.0
