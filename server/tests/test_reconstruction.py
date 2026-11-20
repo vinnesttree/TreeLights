@@ -183,3 +183,23 @@ def test_branch_glints_and_scattered_light_keep_accuracy():
     if placed.any():
         e2 = np.linalg.norm(tf(P[placed]) - tree.positions[placed], axis=1)
         assert np.median(e2) < 2 * tree.link
+
+
+def test_coincident_positions_keep_the_led_that_fits_its_chain():
+    """Two LEDs can't be at one spot: the one whose neighbours disagree loses that
+    position (the case of two LEDs overlapping in the picture during a walk)."""
+    from types import SimpleNamespace
+
+    from treelights.reconstruction.solve import _drop_coincident
+
+    xs = {i: np.array([10.0 * i, 0.0, 0.0]) for i in range(10)}
+    hyps = {i: [SimpleNamespace(X=x, n=5)] for i, x in xs.items()}
+    # LED 7's best position is LED 5's spot (seen under the wrong identity); its second
+    # hypothesis is the right one.
+    hyps[7] = [SimpleNamespace(X=xs[5] + 0.3, n=6), SimpleNamespace(X=xs[7], n=3)]
+    dropped = _drop_coincident(hyps)
+    assert dropped == [7]
+    assert np.allclose(hyps[7][0].X, xs[7]) and len(hyps[5]) == 1
+    # Neighbouring LEDs at their normal spacing are left alone.
+    hyps2 = {i: [SimpleNamespace(X=x, n=5)] for i, x in xs.items()}
+    assert _drop_coincident(hyps2) == []

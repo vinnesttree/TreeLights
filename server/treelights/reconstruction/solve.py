@@ -7,6 +7,7 @@ import logging
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 from .. import __version__
 from . import chain, fill as fillmod, hypotheses as hyp, orient
@@ -34,6 +35,53 @@ class SolveInput:
     f0_prior: float | None = None
     scan_id: str = ""
     wled: dict | None = None
+
+
+COINCIDENT_FRAC = 0.2  # of the typical LED spacing: closer than this, two LEDs can't both be there
+
+
+def _drop_coincident(hyps: dict[int, list]) -> list[int]:
+    """Two different LEDs can't be at the same place. When the best positions of two
+    LEDs coincide, one of them is the other LED seen under the wrong identity: walking
+    around the tree, two LEDs that keep passing each other in the picture merge into
+    one blob for a while, and in some pattern cycles the merged blob carries the other
+    LED's code. Such a position is consistent across views, so nothing else rejects it,
+    and as a "trusted" LED it would even teach the chain a fake connector link. The one
+    whose position fits its own chain neighbours worse loses that hypothesis (ties: the
+    one with less support). Returns the LEDs that lost one."""
+    top = {i: lst[0] for i, lst in hyps.items() if lst}
+    if len(top) < 4:
+        return []
+    idx = sorted(top)
+    steps = [float(np.linalg.norm(top[i + 1].X - top[i].X)) for i in idx if i + 1 in top]
+    if len(steps) < 3:
+        return []
+    L = float(np.median(steps))
+    if L <= 0:
+        return []
+    X = np.array([top[i].X for i in idx])
+    pairs = cKDTree(X).query_pairs(COINCIDENT_FRAC * L)
+
+    def misfit(i: int) -> float:
+        bad = 0.0
+        for k in (i - 1, i + 1):
+            if k in top:
+                bad += max(0.0, float(np.linalg.norm(top[i].X - top[k].X)) / L - 1.5)
+        return bad
+
+    dropped = []
+    for a, b in sorted(pairs):
+        i, j = idx[a], idx[b]
+        if not hyps[i] or not hyps[j] or hyps[i][0] is not top[i] or hyps[j][0] is not top[j]:
+            continue  # already resolved through another pair
+        mi, mj = misfit(i), misfit(j)
+        if abs(mi - mj) > 1e-9:
+            loser = i if mi > mj else j
+        else:
+            loser = i if top[i].n < top[j].n else j
+        hyps[loser] = hyps[loser][1:]
+        dropped.append(loser)
+    return dropped
 
 
 def _apply_overrides(obs: dict, overrides: dict) -> dict:
@@ -129,6 +177,8 @@ def solve(inp: SolveInput, progress=lambda msg: None) -> dict:
     def links_in(t: set[int]) -> int:
         return sum(1 for i in t if i + 1 in t)
 
+    dropped = _drop_coincident(hyps)
+    hyps = {i: lst for i, lst in hyps.items() if lst}
     sel_pos = {i: lst[0].X for i, lst in hyps.items()}
     sigma = {i: lst[0].sigma for i, lst in hyps.items()}
     tier = 1
@@ -258,6 +308,9 @@ def solve(inp: SolveInput, progress=lambda msg: None) -> dict:
     # the reversed map", i.e. clearly above one half.
     if side < 0.55:
         warnings.append("Visibility check failed: the map may be inside-out.")
+    if dropped:
+        warnings.append(f"LED(s) {', '.join(map(str, sorted(dropped)))} were seen at the same spot as another LED "
+                        "(two LEDs overlapping in the picture); that position was set aside.")
     unknown_runs = _runs([i for i in range(n) if statuses[i] == "unknown"])
     for a, b in unknown_runs:
         if b == n - 1:

@@ -692,6 +692,9 @@ This step picks at most one hypothesis per LED, so that the whole chain respects
   - At a real break (§10.3), a break edge costs nothing.
 - **Cost.** O(N · 20 · H²), plus a running minimum for break edges: milliseconds for 600 LEDs.
 - **Why it rejects outliers.** An isolated wrong hypothesis loses, because it would need impossible jumps on both sides.
+- **Two LEDs can't share a spot** (implementation change, draft 4). It is checked before trusted links are chosen. If two LEDs' best hypotheses coincide (closer than 0.2 of the typical spacing), the one that fits its chain neighbours worse loses that hypothesis; ties go to the one with less support.
+  - **Why it's needed:** walking around the tree, two LEDs that keep passing each other in the picture merge into one blob for a while. In some pattern cycles the merged blob carries the other LED's code. That wrong position is consistent across views, so nothing else rejects it.
+  - **What it caused:** in one simulated walk, such a position was trusted and taught the chain a fake connector link, which disabled the bound and left a measured LED 15 cm off. With the check, that walk's worst LED is 0.5 cm off and the report names the LED that was set aside.
 
 ### 9.7 Joint refinement and uncertainty
 
