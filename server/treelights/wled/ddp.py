@@ -75,10 +75,10 @@ def encode_dnrgb(rgb: np.ndarray, timeout_s: int = 2) -> list[bytes]:
 class UdpFrameSender:
     """Sends frames to one controller. Not thread-safe; owned by the output thread."""
 
-    def __init__(self, host: str, protocol: str = "ddp"):
+    def __init__(self, host: str, protocol: str = "ddp", port: int | None = None):
         self.host = host
         self.protocol = protocol
-        self.port = DDP_PORT if protocol == "ddp" else 21324
+        self.port = port or (DDP_PORT if protocol == "ddp" else 21324)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.packets_sent = 0
 

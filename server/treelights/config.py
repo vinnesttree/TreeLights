@@ -22,6 +22,7 @@ class WledSettings(BaseModel):
     http_port: int = 80
     led_count: int = 600
     protocol: Literal["ddp", "dnrgb"] = "ddp"
+    udp_port: int | None = None  # override for testing; default 4048 (DDP) / 21324 (DNRGB)
 
 
 class PowerSettings(BaseModel):
