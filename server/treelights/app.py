@@ -429,7 +429,14 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
     # ---- WLED ----------------------------------------------------------------------------
     @app.get("/api/wled/discover")
     async def wled_discover() -> list[dict]:
-        return await discovery.discover(timeout=3.0)
+        try:
+            return await discovery.discover(timeout=3.0)
+        except discovery.DiscoveryError as e:
+            raise HTTPException(502, str(e))
+        except Exception as e:  # noqa: BLE001 - show the reason, not a bare 500
+            log.exception("WLED discovery failed")
+            raise HTTPException(500, f"Searching for controllers failed ({type(e).__name__}: {e}). "
+                                     "Enter the controller's address instead; the server log has details.")
 
     @app.post("/api/wled/select")
     async def wled_select(body: dict = Body(...)) -> dict:

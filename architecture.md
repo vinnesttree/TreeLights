@@ -204,7 +204,7 @@ Whenever the server stops sending, WLED returns to its own effects, so a crash n
 | LED colors | **DDP** over UDP port 4048. 600 RGB LEDs are 1800 bytes, sent as two packets: 480 pixels at offset 0, and 120 pixels at byte offset 1440. The second packet carries the PUSH flag. |
 | Fallback | WLED's UDP realtime **DNRGB** protocol (port 21324). It can be selected if DDP misbehaves on some firmware version. |
 | Info, config, state | JSON API: `/json/info`, `/json/cfg`, `/json/state`. |
-| Discovery | mDNS `_wled._tcp`. |
+| Discovery | mDNS `_wled._tcp`. If the host's own mDNS responder (avahi, Home Assistant, ...) owns UDP 5353, it falls back to unicast mDNS from a private port. Alongside it, an HTTP sweep of the host's local /24 networks looks for WLED's `/json/info`, which needs no multicast. A failing method is logged and the other's results are still shown. |
 
 - **Calibration frames are sent twice**, a few milliseconds apart. Re-sending the same frame is harmless.
 - **The test animation runs at 40 fps.** 600 WS281x LEDs take about 18 ms to receive their data, so about 55 fps is the hardware ceiling.

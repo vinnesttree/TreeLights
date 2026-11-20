@@ -39,11 +39,11 @@ export function setupPage(): Page {
       }
 
       async function discover() {
-        devices.textContent = "Searching the network (3 s)...";
+        devices.textContent = "Searching the network (a few seconds)...";
         try {
           const list = await api<any[]>("/api/wled/discover");
           if (!list.length) {
-            devices.textContent = "None found. mDNS may be blocked on this network; enter the address instead.";
+            devices.textContent = "None found on this server's network. Enter the controller's address instead (shown in WLED's Wi-Fi settings or your router).";
             return;
           }
           devices.replaceChildren(...list.map((d) =>
