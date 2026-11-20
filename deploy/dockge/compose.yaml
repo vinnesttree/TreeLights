@@ -1,0 +1,36 @@
+# TreeLights stack for Dockge (or plain `docker compose up -d` in this folder).
+#
+# Docker builds the image straight from the GitHub repository, so this file is all
+# the stack needs: no clone. The first deploy takes a few minutes (it builds the web
+# app and installs the Python packages); later ones reuse the build cache.
+#
+# Updating: `pull_policy: build` makes every `docker compose up` rebuild from the
+# latest commit of the branch below, so redeploying the stack (in Dockge, or
+# `docker compose up -d` in this folder) updates it.
+#
+# Data (config, certificates, scans, maps) is kept next to this file in ./data,
+# e.g. /opt/stacks/treelights/data.
+services:
+  treelights:
+    build:
+      # <repository>#<branch>. Change the branch to "main" once the work is merged there.
+      context: https://github.com/vinnesttree/TreeLights.git#ccr-8f206c85-x6h39j
+      dockerfile: docker/Dockerfile
+    image: treelights:local
+    pull_policy: build
+    container_name: treelights
+    # Host networking (Linux hosts): needed for mDNS discovery of WLED and for
+    # sending DDP to it. The app listens on the host's ports directly:
+    #   8443  HTTPS: the app (the phone's camera needs HTTPS)
+    #   8080  plain HTTP: setup page with the QR code and the optional CA certificate
+    # so no `ports:` section. Allow both through the host firewall from the LAN,
+    # plus UDP 5353 for mDNS.
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+    environment:
+      TREELIGHTS_DATA: /data
+      # The HTTPS certificate covers the host's LAN addresses, detected automatically.
+      # If the phone can't connect (several network interfaces, VPNs), set it here:
+      # TREELIGHTS_HOST_IPS: 192.168.1.20
