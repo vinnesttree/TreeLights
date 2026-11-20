@@ -1,4 +1,6 @@
-"""Run TreeLights: HTTPS app on 8443 plus the plain-HTTP setup page on 8080."""
+"""Run TreeLights: the HTTPS app (default port 8443) plus the plain-HTTP setup page
+(default 8080). Ports: --https-port/--http-port, else TREELIGHTS_HTTPS_PORT /
+TREELIGHTS_HTTP_PORT, else the config file, else the defaults."""
 
 from __future__ import annotations
 
@@ -16,6 +18,27 @@ from .app import AppState, create_app
 from .config import data_dir
 
 
+def _env_port(name: str) -> int | None:
+    v = os.environ.get(name, "").strip()
+    if not v:
+        return None
+    if not v.isdigit() or not 1 <= int(v) <= 65535:
+        raise SystemExit(f"{name}={v!r} is not a port number (1-65535).")
+    return int(v)
+
+
+def _check_free(host: str, port: int, what: str) -> None:
+    """Fail clearly if the port is taken (with host networking, by another service on the host)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port))
+        except OSError as e:
+            raise SystemExit(f"Port {port} for the {what} is already in use on this host ({e.strerror}). "
+                             f"Choose another one: TREELIGHTS_{'HTTPS' if what == 'app' else 'HTTP'}_PORT "
+                             f"(in Docker Compose / Dockge: HTTPS_PORT / HTTP_PORT).")
+
+
 async def serve(args: argparse.Namespace) -> None:
     root = Path(args.data or data_dir())
     root.mkdir(parents=True, exist_ok=True)
@@ -24,8 +47,13 @@ async def serve(args: argparse.Namespace) -> None:
     web = Path(args.web or os.environ.get("TREELIGHTS_WEB", Path(__file__).resolve().parents[2] / "web" / "dist"))
     app = create_app(state, web)
     ips = netutil.local_ipv4_addresses()
-    https_port = args.https_port or s.https_port
-    http_port = args.http_port or s.http_port
+    https_port = args.https_port or _env_port("TREELIGHTS_HTTPS_PORT") or s.https_port
+    http_port = args.http_port or _env_port("TREELIGHTS_HTTP_PORT") or s.http_port
+    if not args.no_tls and https_port == http_port:
+        raise SystemExit(f"The app and the setup page need different ports (both are {https_port}).")
+    _check_free(args.host, https_port, "app")
+    if not args.no_tls:
+        _check_free(args.host, http_port, "setup page")
     servers = []
     if args.no_tls:
         servers.append(uvicorn.Server(uvicorn.Config(app, host=args.host, port=https_port, log_level="info", ws_max_size=16 * 2**20)))

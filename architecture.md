@@ -257,6 +257,8 @@ While the server holds the output, it polls `/json/info` about every 3 s:
   - volume `./data:/data`;
   - runs as a non-root user.
 - **Ports.** 8443 serves HTTPS (app, API, WebSockets). 8080 serves plain HTTP for the setup page only (§6.3). The host firewall must allow both from the LAN.
+  - Both are configurable: `TREELIGHTS_HTTPS_PORT` / `TREELIGHTS_HTTP_PORT`, exposed in the compose files as `HTTPS_PORT` / `HTTP_PORT`. With host networking they are the host's own ports.
+  - A port that's already taken stops start-up with a message naming it. The container health check follows the configured port.
 - **Network advice, shown in Setup:**
   - The phone must reach the host directly: no guest network and no client isolation.
   - If the router offers 5 GHz, put the phone on it. The ESP32 only uses 2.4 GHz, so the phone's uploads then don't compete with the LED packets.

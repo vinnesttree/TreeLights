@@ -23,8 +23,10 @@ COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh \
     && useradd --system --uid 1000 --home-dir /app treelights \
     && mkdir -p /data
+# Default ports; TREELIGHTS_HTTPS_PORT / TREELIGHTS_HTTP_PORT change them (with host
+# networking these are the host's ports). The health check follows the setting.
 EXPOSE 8443 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
-  CMD python -c "import ssl,urllib.request;urllib.request.urlopen('https://127.0.0.1:8443/api/health',context=ssl._create_unverified_context(),timeout=4)"
+  CMD python -c "import os,ssl,urllib.request;urllib.request.urlopen('https://127.0.0.1:%s/api/health'%(os.environ.get('TREELIGHTS_HTTPS_PORT') or '8443'),context=ssl._create_unverified_context(),timeout=4)"
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python", "-m", "treelights"]

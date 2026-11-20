@@ -6,12 +6,15 @@ services:
       dockerfile: docker/Dockerfile
     image: treelights:0.1.0
     # Host networking (Linux): needed for mDNS discovery of WLED. The app listens on
-    # 8443 (HTTPS) and 8080 (plain-HTTP setup page) on the host.
+    # the host's ports directly: HTTPS_PORT (default 8443) and HTTP_PORT (plain-HTTP
+    # setup page, default 8080). Set them in a .env file in docker/ or edit the defaults.
     network_mode: host
     restart: unless-stopped
     volumes:
       - ./data:/data
     environment:
       TREELIGHTS_DATA: /data
+      TREELIGHTS_HTTPS_PORT: ${HTTPS_PORT:-8443}
+      TREELIGHTS_HTTP_PORT: ${HTTP_PORT:-8080}
       # Uncomment if the host's LAN address isn't detected automatically:
       # TREELIGHTS_HOST_IPS: 192.168.1.20

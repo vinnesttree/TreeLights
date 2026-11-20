@@ -25,6 +25,7 @@ docker compose -f docker/docker-compose.yml logs treelights   # shows the URL an
 
 - **Raspberry Pi 4/5 (arm64):** the same commands build natively on the Pi. To build both architectures elsewhere, use `docker/build-multiarch.sh` (needs Docker buildx with QEMU emulation).
 - The app listens on **https://&lt;host&gt;:8443**. A plain-HTTP setup page with a QR code and help is on **http://&lt;host&gt;:8080**.
+- **Other ports:** set `HTTPS_PORT` and `HTTP_PORT`, in a `.env` file next to the compose file or in the environment when running `docker compose`. Without Docker, use `--https-port` / `--http-port`, or `TREELIGHTS_HTTPS_PORT` / `TREELIGHTS_HTTP_PORT`.
 - Data is kept in `docker/data/`: config, certificates, scans and maps.
 - **Firewall:** if the host runs one, allow TCP 8443 and 8080 from the LAN, and UDP 5353 for mDNS discovery.
 - **Certificate warning:** Chrome warns about the certificate because it comes from a local authority the container creates.
@@ -43,14 +44,15 @@ docker compose -f docker/docker-compose.yml logs treelights   # shows the URL an
    ```
    Then open `http://<host>:5001`.
 2. **Create the stack.** In Dockge, click **+ Compose**, name it `treelights`, and replace the editor's contents with [`deploy/dockge/compose.yaml`](deploy/dockge/compose.yaml).
+   - **Choose the ports** before deploying: in the file, change the numbers in `${HTTPS_PORT:-8443}` (the app) and `${HTTP_PORT:-8080}` (the setup page), for example to `${HTTPS_PORT:-9443}` and `${HTTP_PORT:-9080}`. Or set `HTTPS_PORT=9443` and `HTTP_PORT=9080` in a `.env` file next to the compose file.
    - Alternatively, save the file as `/opt/stacks/treelights/compose.yaml` and choose **Scan Stacks Folder** from the menu at the top right.
 3. **Deploy.** The first build takes a few minutes: it builds the web app and installs the Python packages. Dockge shows the progress, then the container's health.
-4. **Open it.** The setup page is at **http://&lt;host&gt;:8080** (QR code and help), and the app is at **https://&lt;host&gt;:8443**. Continue with *WLED settings* and *Mapping the tree* below.
+4. **Open it.** The setup page is at **http://&lt;host&gt;:&lt;HTTP_PORT&gt;** (QR code and help), and the app is at **https://&lt;host&gt;:&lt;HTTPS_PORT&gt;** (8080 and 8443 unless changed). Continue with *WLED settings* and *Mapping the tree* below.
 
 **Notes:**
 - **Data** is stored next to the stack's compose file, in `/opt/stacks/treelights/data`: config, certificates, scans and maps. Back up that folder to keep your maps.
 - **Updating:** redeploy the stack. Because of `pull_policy: build`, every `docker compose up` rebuilds from the latest commit of the branch named in the file; unchanged layers come from the build cache. Once the work is merged into `main`, change `#ccr-8f206c85-x6h39j` to `#main` in the file.
-- **No `ports:` section.** The stack uses host networking, which mDNS discovery of WLED needs; the app listens on the host's ports 8443 and 8080 directly. Allow them through the firewall from the LAN, plus UDP 5353. Host networking needs a Linux Docker host.
+- **No `ports:` section.** The stack uses host networking, which mDNS discovery of WLED needs, so the app listens directly on the host's `HTTPS_PORT` and `HTTP_PORT`. Pick ports nothing else on the host uses: if one is taken, the container log names the port and how to change it. Allow both through the firewall from the LAN, plus UDP 5353. Host networking needs a Linux Docker host.
 - **Raspberry Pi 4/5:** the same stack builds natively on arm64.
 - **Phone can't connect** (several network interfaces or a VPN on the host): uncomment `TREELIGHTS_HOST_IPS` in the file, set it to the host's LAN address, and redeploy.
 
@@ -144,7 +146,8 @@ Layout:
 
 | Symptom | What to check |
 |---|---|
-| Camera page says it needs HTTPS | Open the `https://…:8443` address, not `http://`. |
+| Camera page says it needs HTTPS | Open the `https://…` address on the app port (8443 unless changed), not `http://`. |
+| Container restarts; log says a port "is already in use" | Another service on the host uses that port. Set `HTTPS_PORT` / `HTTP_PORT` to free ports and redeploy. |
 | Scan: "the blinking pattern isn't being picked up" | Point the camera at the tree and dim other lights. Check the Setup page's realtime check. |
 | Scan: few LEDs identified on one side | Walk that side again more slowly, or start a new scan. LEDs hidden from every side are placed from the wiring and marked *estimated*. |
 | "The orientation sensor didn't match the camera motion" | The map is still built from the images. Hold the phone upright and don't rotate the screen during the walk. |
