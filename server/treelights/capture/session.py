@@ -172,6 +172,9 @@ class CaptureSession:
                 self._camera_info["up_cam"] = msg["up_cam"]
         elif t == "motion":
             self._motion = True
+        elif t == "camera_info":
+            self._camera_info.update({k: msg[k] for k in ("camera", "up_cam") if k in msg})
+            self.scan.events.append({"type": "camera_info", "camera": msg.get("camera")})
         elif t == "probe_result" and self._probe and not self._probe.done():
             self._probe.set_result(msg.get("delays_ms") or [])
 

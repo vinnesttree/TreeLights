@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import numpy as np
 
+MAX_TURN_DEG = 50.0
+
 
 def _azimuth(C: np.ndarray) -> float:
     return float(np.degrees(np.arctan2(-C[2], C[0])))
@@ -35,7 +37,15 @@ def guidance(m: dict, current_segment: str | None = None) -> dict:
     # Largest gap in viewing directions.
     ext = angles + [angles[0] + 360]
     gaps = [(ext[k + 1] - ext[k], (ext[k] + ext[k + 1]) / 2) for k in range(len(angles))]
-    width, center = max(gaps)
+    cur0 = az.get(current_segment) if current_segment else None
+    if cur0 is None:
+        cur0 = az[sorted(az)[-1]]
+
+    def turn_to(a: float) -> float:
+        return abs((cur0 - a + 180) % 360 - 180)
+
+    # The widest gap; among gaps of similar width, the one needing the smallest turn.
+    width, center = max(gaps, key=lambda g: g[0] - 0.2 * turn_to(g[1]))
     # Pull the target towards where weak LEDs are, if there are many.
     if len(weak) > 0.05 * n:
         P = np.array([l["p"] for l in weak])
@@ -48,6 +58,8 @@ def guidance(m: dict, current_segment: str | None = None) -> dict:
     if cur is None and az:
         cur = az[sorted(az)[-1]]
     turn = (cur - center + 180) % 360 - 180  # positive: turn the tree counter-clockwise (seen from above)
+    # A new view must share LEDs with earlier ones to be placed, so fill big gaps step by step.
+    turn = float(np.clip(turn, -MAX_TURN_DEG, MAX_TURN_DEG))
     done = width <= 60 and measured >= 0.9 * n
     if done:
         msg = f"Coverage looks good: {measured} of {n} LEDs measured. You can solve now, or add views for weak areas."

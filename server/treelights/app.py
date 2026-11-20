@@ -224,7 +224,7 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
     @app.middleware("http")
     async def pin_check(request: Request, call_next):  # noqa: ANN001
         pin = state.config.settings.pin
-        if pin and request.url.path.startswith("/api") and request.url.path != "/api/auth":
+        if pin and request.url.path.startswith("/api") and request.url.path not in ("/api/auth", "/api/health"):
             if request.headers.get("x-treelights-pin") != pin and request.cookies.get("tl_pin") != pin:
                 return JSONResponse({"detail": "PIN required"}, status_code=401)
         return await call_next(request)
@@ -234,6 +234,10 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
         return not pin or ws.cookies.get("tl_pin") == pin or ws.query_params.get("pin") == pin
 
     # ---- general ------------------------------------------------------------------------
+    @app.get("/api/health")
+    def health() -> dict:
+        return {"ok": True, "version": __version__}
+
     @app.post("/api/auth")
     def auth(body: dict = Body(...)) -> Response:
         pin = state.config.settings.pin
