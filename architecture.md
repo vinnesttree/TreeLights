@@ -134,8 +134,8 @@ Walking around the tree changes almost every assumption the tripod design relied
 | A gyro prediction can do worse than none when frames are far apart: the live stream runs at ~8 frames/s, and walking moves the image as much as turning does. | Each source is tracked both with and without the gyro's prediction, and the result that identifies more detections is kept. |
 | Motion blur from walking or turning too fast. | Exposure is locked short. Keyframes are scored by sharpness and by the gyro's turning rate. The phone warns when you turn faster than ~35°/s. |
 | WiFi drops live frames, or the phone disconnects. | The recording is the main source; live frames are feedback and a backup. The server keeps the walk running for 15 s while the phone reconnects. The upload resumes where it stopped. |
-| The upload fails, or the browser can't record. | The map is built from the live frames alone. Without noise that is as good as with the recording; with every simulated fault it measures fewer LEDs and is less reliable (§17), so the phone retries the upload first. |
-| LEDs saturate up close, or are too faint from far away. | The server adjusts the pattern's brightness from what the live frames show. Changes are only made between cycles, so a bit's two slots are always compared at the same brightness. |
+| The upload fails, or the browser can't record. | The map is built from the live frames alone. In simulation that was nearly as good as using both sources (§17). |
+| LEDs saturate up close, or are too faint from far away. | A saturated bright state does no harm, because bits compare bright with dim. If nearly all LEDs saturate, or they are very faint, the server adjusts the brightness during the first two cycles, only between cycles. After that it stays fixed, because each change disturbs the timing sync. |
 | Light scattered onto branches, glints, a TV or a lamp. | Static lights never decode, since they don't follow the pattern. Scattered light decodes as the LED it comes from, so it carries the right identity at the wrong place. The detector marks it diffuse and the multi-view fit sets it aside, as in the tripod design (§8.1, §9.5). |
 
 **Residual risks of walking:**
@@ -508,7 +508,7 @@ Both are decoded the same way, and keyframes from both go into one reconstructio
 - **The code** is the scrambled extended Hamming(16,11) code of the binary pass (§8.2). It has minimum distance 4, so 1–3 wrong bits never give another valid index.
 - **Never off in the code slots.** An LED never goes dark there, so it can be followed between frames while the phone moves. Each bit is decided by comparing the LED's brightness in its two slots. They are 0.2 s apart, so distance, angle and occlusion barely change between them.
 - **Green only:** it is the camera's most sensitive channel.
-- **Brightness** is adjusted between cycles from what the live frames show: lower when more than 30% of LEDs saturate, higher when they are faint.
+- **Brightness** may be adjusted during the first two cycles, only at a cycle boundary, from what the live frames show. It goes down when nearly all LEDs saturate, and up when they are very faint. After that it stays fixed. Every change disturbs the timing sync. In simulation, adjusting all the way through the walk made the levels oscillate, and the sync was lost.
 
 **What the phone sends** (`/ws/walk`, protocol in `walk/protocol.py`):
 - live frames as JPEG, about 960 px wide, each tagged with its capture time and the latest orientation quaternion;
@@ -518,13 +518,13 @@ Both are decoded the same way, and keyframes from both go into one reconstructio
 
 All times are on one phone clock (`performance.timeOrigin + performance.now()`).
 
-**Live feedback.** Every 2.5 s the server decodes the live frames received so far, in its own thread, and sends a status:
+**Live feedback.** Every 2.5 s, or as soon as the previous update is done (about 3 s with every simulated fault), the server decodes the last 30 s of live frames in its own thread. What it found before is kept, so the cost doesn't grow with the length of the walk. It then sends a status:
 - whether the pattern is locked;
 - how many LEDs are identified;
 - for each 30° side of the walk, how many LEDs were identified while the camera faced it, from the orientation sensor;
 - warnings: LEDs at the edge of the picture, hardly any LEDs in view, the pattern not found.
 
-The phone adds its own warning for turning too fast, and draws the coverage ring.
+The phone adds its own warning for turning too fast, and draws the coverage ring. For speed, the live decoding tracks without the gyro. It calibrates the gyro once, with retries every 15 s until that works, and uses it only for each frame's viewing direction.
 
 **Processing, per source** (`walk/pipeline.py`):
 1. **Blobs:** local maxima of the green channel above the local background. Each gets its flux, peak, sharpness and a saturation flag.
@@ -538,6 +538,8 @@ The phone adds its own warning for turning too fast, and draws the coverage ring
 5. **Tracking with the gyro:** each frame's predicted motion is the rotation homography `K·ΔR·K⁻¹` plus the shift voted from the LEDs. The result is kept only if it identifies more detections than tracking without it.
 6. **Decoding** (`walk/decode.py`):
    1. Per track and per cycle, each bit gets a vote: which of its two slots was brighter, and by how much.
+      - **Missing slot.** If only one slot of a pair saw the LED, that counts as a weaker vote, but only if the camera had a frame in the middle of the other slot. At the live stream's 8 frames/s many slots have no such frame. Counting those as "LED too dim to see" gave wrong bits, and on one simulated walk only 38 of 120 LEDs decoded from the live frames.
+      - **Relative contrast.** Each cycle's contrasts are scaled so that its typical bit has the contrast of an unsaturated LED, with a floor so that unmodulated light stays weak. Close to the camera both bright and dim saturate, and every bit then shows a low contrast with the right sign.
    2. Consecutive cycles are merged while their votes agree, so a track that swapped LEDs is split where it swapped.
    3. Each piece is decoded either with hard decisions (every bit reliable, a valid codeword, at most one missing bit), or, if it spans two or more cycles, with soft decisions: the best-scoring LED codeword must explain the votes clearly and beat the runner-up by a margin.
    4. The identity then covers only runs of cycles that agree with the codeword (at most one disagreeing strong vote per cycle), trimmed to the first and last agreeing votes.
@@ -982,18 +984,19 @@ The end-to-end test runs the real server against a virtual phone walking in real
 
 **Results** (150 LEDs on a 74 cm tree, a 50 s walk; two random trees and walks per configuration; errors are after a similarity alignment to the truth):
 
-| Configuration | LEDs identified (live / video) | Wrong identities | Gyro calibrated | Measured | Median error | Max error | Connectors |
+| Configuration | LEDs identified (live / video) | Wrong identities (live / video) | Gyro calibrated | Measured | Median error | Max error | Connectors |
 |---|---|---|---|---|---|---|---|
-| Ideal, tree 1 | 150 / 150 | 0.08% / 0.04% | yes (focal +1.4%) | 150 | 0.03 cm | 0.10 cm | 2 of 2 |
-| Ideal, tree 2 | 149 / 150 | 0 / 0 | yes | 150 | 0.03 cm | 0.18 cm | 2 of 2 |
-| All faults, tree 1 | 138 / 149 | 0.01% / 0.25% | yes | 149 | 0.04 cm | 0.28 cm | 2 of 2 |
-| All faults, tree 2 | 124 / 148 | 0.37% / 0.01% | yes | 147 | 0.05 cm | 0.69 cm | 2 of 2 |
-| Live frames only, ideal | 150 | 0.08% | yes | 150 | 0.03 cm | 0.17 cm | 2 of 2 |
-| Live frames only, all faults (tree 2) | 124 | 0.37% | yes | 122 (+26 estimated) | 0.23 cm | 15.7 cm (1 LED) | 2 of 2 |
+| Ideal, tree 1 | 150 / 150 | 0.21% / 0 | yes (focal +1.4%) | 150 | 0.04 cm | 0.41 cm | 2 of 2 |
+| Ideal, tree 2 | 150 / 150 | 0 / 0 | yes | 150 | 0.11 cm | 0.52 cm | 2 of 2 |
+| All faults, tree 1 | 150 / 150 | 0.24% / 0.08% | yes | 149 (+1 single view) | 0.04 cm | 0.25 cm | 2 of 2 |
+| All faults, tree 2 | 146 / 150 | 0.11% / 0 | yes (focal −3%) | 148 (+2 single view) | 0.08 cm | 0.45 cm | 2 of 2 |
+| Live frames only, ideal, tree 1 | 150 | 0.21% | yes | 150 | 0.04 cm | 0.12 cm | 2 of 2 |
+| Live frames only, all faults, tree 2 | 146 | 0.11% | yes | 146 (+4 estimated) | 0.06 cm | 0.22 cm | 2 of 2 |
 
 - **"Wrong identities"** counts detections given an LED whose true image position is more than 45 px away. Light an LED scatters onto branches nearby is counted separately and correctly carries that LED's identity. Most of the remaining "wrong" detections are that same scattered light, landing further away.
-- **The decoding thresholds** were chosen on tree 1's walks. Tree 2 and the end-to-end walks were not used to choose them.
-- **Live frames alone** are as good as both sources without noise. With every fault they measure fewer LEDs, and one LED was placed 15.7 cm off. The recording is therefore the main source, and the phone retries an interrupted upload before falling back.
+- **The decoding thresholds** were chosen on tree 1's walks. Tree 2, the test suite's walks (a third tree, both configurations, offline and end to end) were not used to choose them.
+- **Live frames alone** give nearly the same map. Still, the recording is the main source: full frame rate and resolution, and fewer blurred frames. The phone retries an interrupted upload before falling back.
+- **End to end** (real server, a virtual phone walking in real time, DDP to a virtual WLED): the maps are as accurate. In this simulation, rendering the full fault scene in real time only reaches about 4 live frames/s. That is too few to decode, so live decoding under faults is tested offline at 8 frames/s.
 
 **Unit tests:** DDP encoding, the Hamming code, the walk pattern and its decoder (wrong answers never accepted under bit errors and track swaps), timing sync with drift, gyro conventions, tracking with and without the gyro, the detector on recorded frames, chain selection on hand-built chains, bound learning, gap filling, and atomic storage.
 

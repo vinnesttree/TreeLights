@@ -26,6 +26,8 @@ from .tracking import TrackSet
 
 PHASE_LO, PHASE_HI = 0.2, 0.8
 MISSING_DIM_STRENGTH = 0.4
+TYPICAL_CONTRAST = 0.5  # |bright - dim| / (bright + dim) of an unsaturated LED is ~0.6
+CONTRAST_FLOOR = 0.08
 CONFLICT_STRENGTH = 0.15
 TRIM_RUN = 3
 WHOLE_TRACK_AGREEMENT = 0.85
@@ -41,8 +43,14 @@ class Identity:
     t1: float = np.inf
 
 
-def _cycle_votes(rows: np.ndarray, k: np.ndarray, ph: np.ndarray) -> dict[int, dict[int, tuple[bool, float]]]:
-    """cycle -> bit -> (value, strength)"""
+def _cycle_votes(rows: np.ndarray, k: np.ndarray, ph: np.ndarray,
+                 sampled: set[int] | None = None) -> dict[int, dict[int, tuple[bool, float]]]:
+    """cycle -> bit -> (value, strength)
+
+    sampled: slots that have a frame in their middle (from all frames, not just this
+    track's). A slot the track has no detection in counts as "LED dim and not seen" only
+    if the camera did look during it; at the live stream's ~8 frames/s many slots simply
+    have no frame in the middle. None: every slot is taken as sampled."""
     good = (ph > PHASE_LO) & (ph < PHASE_HI)
     slots_seen = set(k.tolist())
     flux: dict[tuple[int, int, bool], list[float]] = {}
@@ -52,6 +60,7 @@ def _cycle_votes(rows: np.ndarray, k: np.ndarray, ph: np.ndarray) -> dict[int, d
             flux.setdefault((int(kk) // CYCLE_SLOTS, info.bit, info.complement), []).append(float(f))
     out: dict[int, dict[int, tuple[bool, float]]] = {}
     for c in sorted({c for c, _b, _cmp in flux}):
+        raw: dict[int, float] = {}
         for b in range(N_BITS):
             P = flux.get((c, b, False))
             C = flux.get((c, b, True))
@@ -61,10 +70,20 @@ def _cycle_votes(rows: np.ndarray, k: np.ndarray, ph: np.ndarray) -> dict[int, d
                 p, q = float(np.mean(P)), float(np.mean(C))
                 if p + q > 0:
                     out.setdefault(c, {})[b] = (p > q, abs(p - q) / (p + q))
-            elif P and not C and (kC + 1) in slots_seen and kP in slots_seen:
+                    raw[b] = abs(p - q) / (p + q)
+            elif P and not C and (kC + 1) in slots_seen and (sampled is None or kC in sampled):
                 out.setdefault(c, {})[b] = (True, MISSING_DIM_STRENGTH)
-            elif C and not P and (kP - 1) in slots_seen and kC in slots_seen:
+            elif C and not P and (kP - 1) in slots_seen and (sampled is None or kP in sampled):
                 out.setdefault(c, {})[b] = (False, MISSING_DIM_STRENGTH)
+        # Relative contrast: when an LED saturates (close to the camera), bright and dim
+        # both clip and every bit of the cycle shows a low contrast, though the signs are
+        # still right. Scale each cycle so its typical bit has the contrast of an
+        # unsaturated LED; the floor keeps unmodulated blobs (static lights, noise:
+        # a few percent) weak.
+        if len(raw) >= 4:
+            gain = TYPICAL_CONTRAST / max(float(np.median(list(raw.values()))), CONTRAST_FLOOR)
+            if gain > 1:
+                out[c] = {b: (v, min(1.0, st * gain) if b in raw else st) for b, (v, st) in out[c].items()}
     return out
 
 
@@ -79,10 +98,19 @@ def _conflicts(merged: dict[int, list[tuple[bool, float]]], cyc: dict[int, tuple
     return n
 
 
-def decode_track(rows: np.ndarray, frame_t: np.ndarray, timing: Timing, n_leds: int) -> list[Identity]:
+def sampled_slots(frame_t: np.ndarray, timing: Timing) -> set[int]:
+    """Slots with at least one frame in their middle."""
+    k, ph = timing.slot_phase(np.asarray(frame_t))
+    return set(k[(ph > PHASE_LO) & (ph < PHASE_HI)].tolist())
+
+
+def decode_track(rows: np.ndarray, frame_t: np.ndarray, timing: Timing, n_leds: int,
+                 sampled: set[int] | None = None) -> list[Identity]:
     fi = rows[:, 1].astype(int)
     k, ph = timing.slot_phase(frame_t[fi])
-    cycles = _cycle_votes(rows, k, ph)
+    if sampled is None:
+        sampled = sampled_slots(frame_t, timing)
+    cycles = _cycle_votes(rows, k, ph, sampled)
     pieces: list[tuple[list[int], dict[int, list[tuple[bool, float]]]]] = []
     for c in sorted(cycles):
         cyc = cycles[c]
@@ -191,10 +219,11 @@ def decode_tracks(ts: TrackSet, frame_t: np.ndarray, timing: Timing, n_leds: int
     out: dict[int, list[Identity]] = {}
     if not timing.ok or len(ts.rows) == 0:
         return out
+    sampled = sampled_slots(frame_t, timing)
     for tid, rows in ts.by_track().items():
         if len(rows) < min_rows:
             continue
-        ids = decode_track(rows, frame_t, timing, n_leds)
+        ids = decode_track(rows, frame_t, timing, n_leds, sampled)
         if ids:
             out[tid] = ids
     return out

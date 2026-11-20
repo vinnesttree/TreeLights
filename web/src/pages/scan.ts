@@ -141,7 +141,8 @@ export function scanPage(): Page {
 
       function hello() {
         const { width, height } = cam!.size;
-        return { type: "hello", role: "walk", scan: state === "walking" ? scan : undefined, view: state === "walking" ? view : undefined,
+        const resume = state === "walking" || state === "stopping";
+        return { type: "hello", role: "walk", scan: resume ? scan : undefined, view: resume ? view : undefined,
           camera: { width, height, device: cam!.deviceId, sensor: orient.source, screen: screen.orientation?.type } };
       }
 
@@ -312,9 +313,15 @@ export function scanPage(): Page {
         timers = [];
         const d = orient.drain();
         if (d.t.length) sock?.sendJson({ type: "motion", t: d.t, q: d.q });
-        sock?.sendJson({ type: "stop", reason });
         banner.textContent = "";
         camStatus.textContent = "Stopping...";
+        // If the connection is down right now, keep trying: the socket reconnects (and
+        // resumes the walk) by itself, and the server answers "stopped".
+        const trySend = () => {
+          if (state !== "stopping" || unmounted) return;
+          if (!sock?.sendJson({ type: "stop", reason })) timers.push(window.setTimeout(trySend, 1000));
+        };
+        trySend();
       }
 
       async function finish(m: { scan: string; view: string; upload: string; process: string }) {
@@ -380,6 +387,7 @@ export function scanPage(): Page {
         } catch (e) {
           state = "done";
           progress.style.display = "none";
+          camStatus.textContent = "No map was built.";
           setMsg(`Building the map failed: ${fmtErr(e)}`, "fail");
           startBtn.style.display = "";
           startBtn.disabled = false;
