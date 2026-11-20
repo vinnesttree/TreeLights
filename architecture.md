@@ -1,11 +1,12 @@
 # TreeLights — Architecture
 
-**Status: DRAFT 2 — awaiting approval.** No implementation code exists yet.
+**Status: DRAFT 3 — approved.** Implementation follows the build order in §18.
 
 | Revision | Changes |
 |---|---|
 | Draft 1 | Initial proposal. |
 | Draft 2 | Records your decisions (§1). Adds a failure analysis of draft 1 (§3) and reworks the design to handle each failure. Narrows this build to detection, mapping and one test animation. |
+| Draft 3 (approved) | The phone stays on a tripod and the tree is turned between views (§7.1). Chrome's certificate warning is accepted; installing the CA is optional (§6.3). Dynamic `d_max` as in §10.1 confirmed. |
 
 ## 1. Decisions
 
@@ -15,6 +16,8 @@
 | Distance bound between consecutive LEDs (`d_max`) | **Dynamic.** Learned from the measurements for each link of the chain, not typed in (§10). |
 | Reference length | The tree's height, measured from the lowest light to the highest light (§9.10). |
 | Phone | Android, using the Chrome browser. No native app. |
+| Capture setup | The phone stays fixed on a tripod. The tree is turned between views. |
+| HTTPS | Chrome's warning for the server's certificate is acceptable. It appears when the page is opened, never per camera frame. Installing the CA is optional. |
 | Host | Linux, Docker with host networking. |
 | Stack | Python backend (FastAPI, OpenCV, numpy, scipy). TypeScript + three.js web app. |
 | Priority | LED detection and mapping come first, and every part of detection is built. Animations: one test animation only. |
@@ -242,8 +245,8 @@ Chrome only allows camera access on secure (HTTPS) pages. The setup works like t
 2. **Setup page.** `http://<host>:8080` is a plain-HTTP setup page, also printed as a QR code in the container log. It offers:
    - the CA certificate to download, with install instructions. On Android: Settings → Security → Encryption & credentials → Install a certificate → CA certificate; the wording varies by Android version.
    - a link to the HTTPS app.
-3. **Installing the CA is recommended:** no warnings, and camera permission is remembered.
-   - Skipping it also works: Chrome shows a warning you tap through, possibly once per session.
+3. **Default: tap through Chrome's warning.** It appears when the page is opened (Chrome remembers the decision for a while), never per camera frame: frames travel over the page's single WebSocket connection, which Chrome lets through once the warning was accepted for that address.
+   - Installing the CA is optional. It removes the warning and lets Chrome remember the camera permission.
    - Both paths get tested on your phone in build step 1.
 4. **Limiting the CA's power.** The CA carries X.509 name constraints that limit it to private LAN address ranges and the host name, wherever the phone's certificate verifier honors them. Its private key never leaves `/data`.
 5. **Fallback.** If live camera access fails entirely, recorded-video mode (§7.7) needs only a file upload.
@@ -260,11 +263,15 @@ Chrome only allows camera access on secure (HTTPS) pages. The setup works like t
 
 1. **Setup:** pick the WLED controller, run the checks, enter the tree height.
 2. **Camera calibration** (optional, once per phone, §9.2).
-3. **Calibrate.** For each view:
-   - Put the phone on a stand facing the tree, tap Start, and wait about 30–60 s.
-   - The app then says where to put the phone next.
-   - Repeat until coverage is good: typically 6–8 views, and at least 4 are required.
-   - Instead of moving the phone, you can turn the tree on a rotating stand. For the math, that's the same thing.
+3. **Calibrate.** The phone stays on a tripod, aimed at the tree, for the whole scan. For each view:
+   1. Turn the tree by the angle the app suggests (about 45°), then step out of the picture.
+   2. Start the view. Touching the tripod-mounted phone can shake it, so the view can be started from any other browser (laptop or second phone) on the **Control** panel, or from the tripod phone with a 5 s countdown.
+   3. The server waits until the scene has settled (§7.5), then captures for about 30–60 s.
+   4. Repeat until coverage is good: typically 8 views (one full turn), and at least 4 are required.
+
+   For the reconstruction, turning the tree in front of a fixed camera is the same as moving the camera around a fixed tree: only LED positions relative to the tree are used. It has two extra benefits:
+   - Reflections in mirrors, windows and screens stay fixed relative to the camera while the tree turns, so they don't line up across views in the tree's frame and are rejected by the geometry.
+   - Every view is a rotation about the same vertical axis, which gives a strong estimate of "up" and of the tree's axis (§9.4).
 4. **Solve:**
    - Review the 3D map and its quality report.
    - Run the sweep test on the real tree.
@@ -404,6 +411,7 @@ When a frame is rejected:
   No user decision is needed.
 - **Frequent movement** (for example more than 3 times in 2 minutes) pauses capture and asks for a stable stand.
 - **A bump to the tree** rather than the phone looks the same, and is handled the same way.
+- **Settling after a turn.** A freshly turned tree keeps swaying, and the person who turned it may still be in the picture. Before a view starts, the server captures the reference constellation repeatedly, about 1 s apart, until two in a row match within ~1 px and a fresh dark frame passes the sanity check (§8.1). Only then do the dark reference and capture begin. If it doesn't settle within 30 s, the phone says why.
 
 ### 7.6 Session protocol and resume
 
@@ -441,10 +449,10 @@ This mode is for when live camera access isn't possible. It also lets you use th
 
 After each view, a worker quickly rebuilds the map from everything captured so far. The phone shows:
 - which views are registered, and how many LEDs have been measured from 2 or more views;
-- a top-down sketch of the camera positions around the tree;
-- **where to go next:** the largest gap in camera directions, weighted by where the unmeasured LEDs are.
+- a top-down sketch of the tree with the directions it has been viewed from;
+- **how far to turn the tree next:** towards the largest gap in viewing directions, weighted by where the unmeasured LEDs are.
 
-The quick reconstruction also predicts which LEDs face the next view, which focuses that view's sequential pass (§7.3). If you can't reach some directions, you mark them as blocked and the guidance stops suggesting them.
+The quick reconstruction also predicts which LEDs face the next view, which focuses that view's sequential pass (§7.3).
 
 ## 8. 2D detection and decoding
 
@@ -516,14 +524,15 @@ Random seeds are fixed, so the same scan always produces the same map.
 ### 9.4 World orientation
 
 **Up axis.** Decided by agreement between independent estimates:
-- the phones' gravity vectors, rotated into world coordinates by each camera's pose;
-- the average camera "up" direction, since people hold phones upright;
-- the normal of the plane through the camera positions;
+- **the turning axis:** the tree is turned about a vertical axis, so the relative rotations between views all share one axis. This is the strongest estimate;
+- the phone's gravity vector, rotated into the tree's frame by each camera's pose;
+- the average camera "up" direction, since a tripod-mounted phone is roughly upright;
+- the normal of the plane through the camera positions, which lie on a circle around the tree;
 - the long axis of the point cloud.
 
 The largest group agreeing within about 15° wins, and any disagreement is reported. The Map page has a one-tap fix.
 
-**Tree axis.** A vertical line, fitted jointly over all heights as the center of a cone through the outer LEDs. This works even when only the front half of the tree is visible, where a per-height center would be biased.
+**Tree axis.** The turning axis, where the camera poses give it clearly. Otherwise a vertical line fitted jointly over all heights as the center of a cone through the outer LEDs.
 
 Both are provisional at this stage and finalised in §9.10.
 
@@ -538,7 +547,7 @@ Both are provisional at this stage and finalised in §9.10.
 **Tree-volume prior.**
 - A generous envelope of the tree is built from the most reliable hypotheses: the radius profile × about 1.3, and the height range + 10%.
 - Hypotheses outside it get a cost that grows with distance.
-- This handles mirror and window reflections, which agree across views and therefore pass draft 1's checks.
+- This handles reflections that survive the geometry checks. With the tree turned in front of a fixed camera, most reflections don't line up across views anyway (§7.1).
 - It is soft, never a hard cut.
 
 LEDs seen in only one segment get no hypotheses here; §9.9 places them.
@@ -774,7 +783,8 @@ The web app is phone-first, built with TypeScript, Vite and three.js, and served
 | Page | Purpose |
 |---|---|
 | Setup | Controller discovery and checks, tree height, network and HTTPS help, power limit. |
-| Calibrate | Camera setup, capture progress, live detection overlay, warnings, coverage guidance, video upload. |
+| Calibrate | Runs on the tripod phone: camera setup, capture progress, live detection overlay, warnings, coverage guidance, video upload. |
+| Control | Runs on any other browser: start the next view, see progress and "turn the tree by N°" guidance without touching the tripod phone. |
 | Camera calibration | Optional: the ChArUco board, shown on a monitor, and the capture, done on the phone. |
 | Map | 3D review, quality report, editing, re-scan, versions, activation, export. |
 | Test | Sweep test, status colors, identify LED, brightness. |
@@ -860,7 +870,4 @@ docker/              Dockerfile, docker-compose.yml
 
 ## 19. Open questions
 
-1. **Dynamic `d_max`:** is §10.1 what you meant? If you know how the string is made up (for example 12 strands of 50 joined by connectors), that helps testing, but it isn't required.
-2. **Access to the tree:** can you walk all the way round it, or is part of it against a wall?
-3. **Phone stand:** do you have a stand or tripod? Hybrid mode tolerates small shakes, but sequential mode needs the phone still.
-4. **Certificate:** are you OK installing the local CA certificate on your phone (recommended)? Or would you rather tap through the browser warning each session?
+None. Draft 3 records the answers to draft 2's questions (§1).
