@@ -42,7 +42,8 @@ class Scan:
         sid = new_id()
         root = Path(scans_dir) / sid
         root.mkdir(parents=True)
-        meta = {"id": sid, "created": dt.datetime.now().isoformat(timespec="seconds"), "led_count": led_count,
+        seq = 1 + max([int((storage.read_json(p / "scan.json", {}) or {}).get("seq", 0)) for p in Path(scans_dir).iterdir() if p.is_dir()] + [0])
+        meta = {"id": sid, "seq": seq, "created": dt.datetime.now().isoformat(timespec="seconds"), "led_count": led_count,
                 "views": [], "segments": {}, **(extra or {})}
         storage.atomic_write_json(root / "scan.json", meta)
         return Scan(root)
@@ -194,7 +195,11 @@ class ScanStore:
 
     def prune_frames(self, keep_ids: set[str], keep_recent: int) -> list[str]:
         """Delete raw frames of old scans (detections are kept). Returns pruned ids."""
-        scans = sorted((p for p in self.dir.iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True)
+        def order(p: Path) -> tuple:
+            meta = storage.read_json(p / "scan.json", {}) or {}
+            return (int(meta.get("seq", 0)), p.name)
+
+        scans = sorted((p for p in self.dir.iterdir() if p.is_dir()), key=order, reverse=True)
         pruned = []
         for k, p in enumerate(scans):
             if k < keep_recent or p.name in keep_ids:

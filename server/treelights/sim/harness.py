@@ -6,7 +6,6 @@ virtual WLED and a virtual phone. Used by tests and the demo/simulation mode.
 
 from __future__ import annotations
 
-import asyncio
 import concurrent.futures
 from dataclasses import dataclass, field
 from pathlib import Path

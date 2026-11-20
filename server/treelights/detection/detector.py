@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 
 K_SIGMA = 7.0
-ABS_FLOOR = 5.0
+ABS_FLOOR = 10.0  # DN; compression noise (JPEG/H.264) is heavy-tailed, so k*sigma alone isn't enough
 PEAK_NMS_PX = 4
 CORE_WIN = 6
 MAX_CANDIDATES = 3

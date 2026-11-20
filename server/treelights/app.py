@@ -17,7 +17,8 @@ import numpy as np
 from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 
-from . import __version__
+from . import __version__, camcal
+from .capture import video as videomode
 from .capture.session import CaptureSession
 from .capture.store import ScanStore
 from .config import ConfigStore
@@ -67,6 +68,7 @@ class AppState:
         self.capture_executor = capture_executor or executor
         self.scans = ScanStore(self.data_dir)
         self.maps = MapStore(self.data_dir)
+        self.profiles = camcal.ProfileStore(self.data_dir)
         self.session: CaptureSession | None = None
         self.jobs: dict[str, Job] = {}
         self.guidance: dict | None = None
@@ -97,6 +99,9 @@ class AppState:
         if scan_id:
             scan = self.scans.get(scan_id)
         else:
+            # Retention (§13): raw frames of old scans are deleted; detections are kept.
+            active = self.maps.active()
+            self.scans.prune_frames({active["scan"]} if active else set(), s.raw_frame_retention_scans)
             breaks = self.link.cfg.output_breaks() if self.link.cfg else []
             scan = self.scans.create(s.wled.led_count, {
                 "output_breaks": breaks,
@@ -162,8 +167,9 @@ class AppState:
 
         async def run() -> None:
             try:
+                f0 = self.profiles.prior_for(scan.meta.get("segments", {}))
                 m = await asyncio.get_running_loop().run_in_executor(
-                    self.executor, run_solve, str(scan.root), s.tree_height_cm, prev, wled)
+                    self.executor, run_solve, str(scan.root), s.tree_height_cm, prev, wled, f0)
                 job.result = {"map": self.maps.save(m), "quality": m["quality"]}
                 job.status = "done"
             except Exception as e:  # noqa: BLE001
@@ -219,6 +225,7 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
         if state.session:
             await state.session.stop()
         await state.monitor.stop()
+        await state.link.close()
         state.output.stop()
 
     @app.middleware("http")
@@ -383,6 +390,122 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
         if not j:
             raise HTTPException(404, "no such job")
         return j.to_dict()
+
+    # ---- camera calibration (§9.2) -----------------------------------------------------------
+    @app.get("/api/camcal/board.png")
+    def camcal_board(w: int = 1920, h: int = 1080) -> Response:
+        return Response(camcal.board_png(w, h), media_type="image/png")
+
+    @app.post("/api/camcal/frame")
+    async def camcal_frame(request: Request, width: int, height: int, device: str = "") -> dict:
+        data = await request.body()
+        if len(data) > 20 * 2**20:
+            raise HTTPException(413, "image too large")
+        try:
+            return await asyncio.get_running_loop().run_in_executor(
+                None, state.profiles.add_frame, device or None, width, height, data)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.post("/api/camcal/solve")
+    async def camcal_solve(body: dict = Body(...)) -> dict:
+        try:
+            return await asyncio.get_running_loop().run_in_executor(
+                None, state.profiles.solve, body.get("device") or None, int(body["width"]), int(body["height"]))
+        except (ValueError, KeyError) as e:
+            raise HTTPException(400, str(e))
+
+    @app.post("/api/camcal/reset")
+    def camcal_reset(body: dict = Body(...)) -> dict:
+        state.profiles.reset(body.get("device") or None, int(body["width"]), int(body["height"]))
+        return {"ok": True}
+
+    @app.get("/api/camcal/profiles")
+    def camcal_profiles() -> dict:
+        return state.profiles.profiles()
+
+    # ---- recorded-video mode (§7.7) -------------------------------------------------------------
+    MAX_VIDEO = 2 * 2**30
+
+    @app.post("/api/scans/{sid}/video/play")
+    async def video_play(sid: str, body: dict = Body(default={})) -> dict:
+        try:
+            scan = state.scans.get(sid)
+        except FileNotFoundError:
+            raise HTTPException(404, "no such scan")
+        if state.session and state.session.busy():
+            raise HTTPException(409, "A live view is being captured.")
+        n = scan.meta["led_count"]
+        levels = None
+        if state.session and state.session.scan.id == sid:
+            levels = [int(v) for v in state.session.cal.levels]
+        seed = int(time.time()) % 100000
+        tl = videomode.Timeline.build(n, seed, levels)
+        countdown = float(body.get("countdown_s", 10))
+        vid = scan.add_view({"mode": "video", "status": "recording", "timeline": tl.to_json()})
+        owner = "video-sequence"
+        ok, holder = state.output.acquire(owner, "calibration", ttl=countdown + tl.duration + 30)
+        if not ok:
+            raise HTTPException(409, f"LED output is in use ({holder.kind if holder else '?'}).")
+        state.output.set_renderer(owner, videomode.player(tl, countdown), fps=40)
+
+        async def finish() -> None:
+            await asyncio.sleep(countdown + tl.duration + 1.5)
+            state.output.release(owner)
+            scan.set_view(vid, status="awaiting_upload")
+
+        asyncio.ensure_future(finish())
+        return {"view": vid, "countdown_s": countdown, "duration_s": round(tl.duration, 1)}
+
+    def _video_path(sid: str, vid: str) -> Path:
+        scan = state.scans.get(sid)
+        if not any(v["id"] == vid for v in scan.meta["views"]):
+            raise HTTPException(404, "no such view")
+        p = scan.root / "videos" / f"{vid}.upload"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+
+    @app.get("/api/scans/{sid}/video/{vid}/upload")
+    def video_upload_size(sid: str, vid: str) -> dict:
+        p = _video_path(sid, vid)
+        return {"size": p.stat().st_size if p.exists() else 0}
+
+    @app.put("/api/scans/{sid}/video/{vid}/upload")
+    async def video_upload_chunk(sid: str, vid: str, request: Request, offset: int = 0) -> dict:
+        """Resumable upload: chunks are appended at `offset`, which must equal the current size."""
+        p = _video_path(sid, vid)
+        size = p.stat().st_size if p.exists() else 0
+        if offset != size:
+            raise HTTPException(409, f"offset {offset} != size {size}")
+        with open(p, "ab") as f:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > MAX_VIDEO:
+                    raise HTTPException(413, "video too large")
+                f.write(chunk)
+        return {"size": size}
+
+    @app.post("/api/scans/{sid}/video/{vid}/decode")
+    async def video_decode(sid: str, vid: str) -> dict:
+        p = _video_path(sid, vid)
+        if not p.exists() or p.stat().st_size == 0:
+            raise HTTPException(400, "upload the video first")
+        scan = state.scans.get(sid)
+        tl_meta = scan.view(vid).get("timeline")
+        job = Job("video", sid)
+        state.jobs[job.id] = job
+
+        async def run() -> None:
+            try:
+                job.result = await asyncio.get_running_loop().run_in_executor(
+                    state.executor, videomode.decode_job, str(scan.root), vid, str(p), tl_meta)
+                job.status = "done"
+            except Exception as e:  # noqa: BLE001
+                job.status, job.error = "failed", str(e)
+            job.finished = time.time()
+
+        asyncio.ensure_future(run())
+        return job.to_dict()
 
     # ---- maps -----------------------------------------------------------------------------
     @app.get("/api/maps")

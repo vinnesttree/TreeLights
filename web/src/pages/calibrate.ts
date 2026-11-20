@@ -250,6 +250,7 @@ export function calibratePage(): Page {
         ),
         panel,
         sv.el,
+        videoCard(),
       );
       devSelect.onchange = () => startCamera(devSelect.value);
       api("/api/state").then((s) => {
@@ -270,4 +271,72 @@ export function calibratePage(): Page {
 function spread(a: number[]): number {
   if (a.length < 2) return 0;
   return Math.max(...a) - Math.min(...a);
+}
+
+/** Recorded-video mode (architecture §7.7): play the sequence, record it with the phone's
+ *  own camera app (manual exposure/focus possible), upload, decode. */
+function videoCard(): HTMLElement {
+  const msg = h("div");
+  const file = h("input", { type: "file", accept: "video/*" }) as HTMLInputElement;
+  file.setAttribute("capture", "environment");
+  const bar = h("div");
+  const progress = h("div", { class: "progress", style: { display: "none" } }, bar);
+  let view: string | null = null;
+  let scan: string | null = null;
+  const show = (text: string, cls = "ok") => msg.replaceChildren(h("div", { class: `notice ${cls}` }, text));
+
+  async function play() {
+    try {
+      const st = await api("/api/state");
+      scan = st.scan ?? (await api("/api/scans", { body: {} })).scan;
+      const r = await api(`/api/scans/${scan}/video/play`, { body: { countdown_s: 10 } });
+      view = r.view;
+      show(`Start recording now. The sequence begins in ${r.countdown_s} s (the tree pulses orange until then) and lasts ${Math.round(r.duration_s / 60 * 10) / 10} min. Keep the phone still, stop recording after the final flashes, then upload.`, "warn");
+    } catch (e) {
+      show(fmtErr(e), "fail");
+    }
+  }
+
+  async function upload() {
+    const f = file.files?.[0];
+    if (!f || !scan || !view) return show("Play the sequence first, then choose the recording.", "warn");
+    const base = `/api/scans/${scan}/video/${view}`;
+    progress.style.display = "";
+    const CHUNK = 4 * 2 ** 20;
+    try {
+      let { size } = await api(`${base}/upload`);
+      while (size < f.size) {
+        const body = f.slice(size, Math.min(size + CHUNK, f.size));
+        const res = await fetch(`${base}/upload?offset=${size}`, { method: "PUT", body, credentials: "same-origin" });
+        if (res.ok) size = (await res.json()).size;
+        else if (res.status === 409) size = (await api(`${base}/upload`)).size; // resume from the server's size
+        else throw new Error(`upload failed (${res.status})`);
+        bar.style.width = `${(100 * size) / f.size}%`;
+      }
+      show("Uploaded. Decoding... (about a minute)", "warn");
+      let job = await api(`${base}/decode`, { body: {} });
+      while (job.status === "running") {
+        await new Promise((r) => setTimeout(r, 2000));
+        job = await api(`/api/jobs/${job.id}`);
+      }
+      if (job.status !== "done") throw new Error(job.error ?? "decode failed");
+      const r = job.result;
+      show(`Decoded ${r.detections} LEDs in ${r.segments.length} segment(s), ${r.blocks_ok} of ${r.blocks_total} blocks aligned.` +
+        (r.failed_leds.length ? ` ${r.failed_leds.length} LEDs need a re-scan.` : "") + (r.warnings.length ? " " + r.warnings.join(" ") : ""),
+        r.blocks_ok === r.blocks_total ? "ok" : "warn");
+    } catch (e) {
+      show(`${fmtErr(e)} You can retry; the upload resumes where it stopped.`, "fail");
+    }
+  }
+
+  return h("div", { class: "card" },
+    h("h2", {}, "Video mode (fallback)"),
+    h("p", { class: "small muted" }, "If live capture doesn't work, record the sequence with the phone's own camera app instead. Pro/manual mode with fixed focus and exposure works best. Turn the tree between recordings like between views."),
+    h("div", { class: "row" }, h("button", { onclick: play }, "Play sequence")),
+    h("label", {}, "Recording"),
+    file,
+    h("div", { class: "row", style: { marginTop: "8px" } }, h("button", { class: "primary", onclick: upload }, "Upload and decode")),
+    progress,
+    msg,
+  );
 }

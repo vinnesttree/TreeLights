@@ -6,6 +6,7 @@ import { controlPage } from "./pages/control";
 import { mapPage } from "./pages/map";
 import { testPage } from "./pages/test";
 import { homePage } from "./pages/home";
+import { camcalPage } from "./pages/camcal";
 
 const routes: Record<string, () => Page> = {
   "": homePage,
@@ -14,6 +15,7 @@ const routes: Record<string, () => Page> = {
   control: controlPage,
   map: mapPage,
   test: testPage,
+  camcal: camcalPage,
 };
 
 let current: Page | null = null;

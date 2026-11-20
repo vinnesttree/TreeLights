@@ -43,7 +43,6 @@ def _project(X: np.ndarray, R: np.ndarray, t: np.ndarray, K: Intrinsics) -> tupl
 
 def build_hypotheses(obs: dict[str, dict[int, list[dict]]], cams: Cameras, n_leds: int) -> dict[int, list[Hypothesis]]:
     Ks = {s: cams.intrinsics(s) for s in cams.poses}
-    rays: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     out: dict[int, list[Hypothesis]] = {}
     scene = np.ptp(np.array([cams.center(s) for s in cams.poses]), axis=0).max() or 1.0
     merge = 0.004 * scene

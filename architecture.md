@@ -1,6 +1,6 @@
 # TreeLights — Architecture
 
-**Status: DRAFT 3 — approved.** Implementation follows the build order in §18.
+**Status: DRAFT 3 — approved and implemented.** Build steps 1–10 of §18 are done and tested in simulation. Step 11, validation on your real tree, is still to do. Changes made during implementation are noted where they apply.
 
 | Revision | Changes |
 |---|---|
@@ -450,7 +450,7 @@ This mode is for when live camera access isn't possible. It also lets you use th
 After each view, a worker quickly rebuilds the map from everything captured so far. The phone shows:
 - which views are registered, and how many LEDs have been measured from 2 or more views;
 - a top-down sketch of the tree with the directions it has been viewed from;
-- **how far to turn the tree next:** towards the largest gap in viewing directions, weighted by where the unmeasured LEDs are.
+- **how far to turn the tree next:** towards the largest gap in viewing directions, weighted by where the unmeasured LEDs are. Among gaps of similar size the smallest turn wins, and a single turn is capped at 50°. A new view must share LEDs with earlier ones to be placed, so a large gap is filled step by step.
 
 The quick reconstruction also predicts which LEDs face the next view, which focuses that view's sequential pass (§7.3).
 
@@ -459,7 +459,7 @@ The quick reconstruction also predicts which LEDs face the next view, which focu
 ### 8.1 Single-LED frames
 
 1. **Difference.** Take the signed difference to the dark reference, per color channel.
-2. **Noise and threshold.** Estimate each channel's noise robustly from the median absolute deviation. The threshold is about 6–8 × that noise, with an absolute floor.
+2. **Noise and threshold.** Estimate each channel's noise robustly from the median absolute deviation. The threshold is 7 × that noise, with an absolute floor of 10 DN. JPEG and H.264 compression noise is heavy-tailed, so a noise multiple alone lets compression artefacts through. Auto-brightness aims typical LEDs at about 90 DN, well above the floor.
 3. **Expected color.** Project the difference onto the expected color learned in the color check. The off-color part is kept for verification.
 4. **Peak finding.** Find local maxima with a minimum separation, rather than plain connected regions, so an LED and a nearby reflection stay separate.
 5. **Core-only centroid.** Compute the sub-pixel centroid from pixels above 50% of the peak, in a small window. Glow through needles is lopsided; using only the core stops it from pulling the position.
@@ -473,12 +473,13 @@ The quick reconstruction also predicts which LEDs face the next view, which focu
 ### 8.2 Binary-coded frames
 
 - **Code.** Each LED index is encoded as an extended Hamming(16,11) codeword.
+  - Before encoding, the index is scrambled by an invertible map mod 2048 (i·1031 + 517). Every bit frame is then about half lit. Without the scramble, with 600 LEDs the top data bits are 0 for every LED and their pattern frames would be empty.
   - 11 data bits cover up to 2048 LEDs.
   - Any two codewords differ in at least 4 bits, so 1–3 bit errors always produce an invalid word.
   - Invalid words are rejected, never corrected into a possibly wrong index.
 - **Complement frames.** Each bit is shown as a pattern frame and its complement, so every LED is lit in exactly one frame of each pair. A bit is decided by comparing that LED's own brightness in the two frames, not by a global threshold.
 - **Peaks** are found in the all-on reference image. Peak finding separates neighbouring LEDs.
-- **Registration.** Each frame is registered to the reference, using phase correlation of dark-subtracted images. A shift over 3 px, or a weak correlation, means a recapture. This also tolerates small hand shake.
+- **Registration.** Each frame's peaks are matched to the nearest reference peaks, and the median displacement is the shift. A shift over 3 px, or fewer than 70% of peaks matching, means a recapture. This also tolerates small hand shake. Phase correlation was tried first, but it sometimes locked onto a wrong offset with these sparse, repetitive point patterns.
 - **Bit reliability.** For each peak and bit: reliability = |pattern − complement| / (pattern + complement). Any unreliable bit rejects that peak. Two LEDs merged into one peak give unreliable bits, so they're rejected this way.
 - **Pair consistency.** In each pattern/complement pair, most peaks must be lit in exactly one of the two frames. Otherwise the pair was stale or caught mid-change (rolling shutter), and it is recaptured.
 - **Candidates.** A peak that decodes to index *i* becomes a candidate for LED *i*. A reflection decodes to the same index and simply becomes another candidate.
@@ -543,6 +544,8 @@ Both are provisional at this stage and finalised in §9.10.
 2. Collect inliers: at most one candidate per segment, reprojection error under about 3 px, and in front of the camera.
 3. Refine each hypothesis, and merge duplicates.
 4. Keep up to 5. Each records its position, supporting segments, reprojection error, triangulation angle and uncertainty.
+   - The triangulation angle counts as min(a, 180° − a). Rays from exactly opposite sides of the tree are nearly collinear, so they fix depth as poorly as nearly parallel rays.
+   - A hypothesis's cost includes its uncertainty.
 
 **Tree-volume prior.**
 - A generous envelope of the tree is built from the most reliable hypotheses: the radius profile × about 1.3, and the height range + 10%.
@@ -630,9 +633,9 @@ This step picks at most one hypothesis per LED, so that the whole chain respects
 
 ### 10.2 Learning the bounds
 
-1. **Trusted links.** Consecutive LEDs that both have a dominant hypothesis, seen by 3 or more segments with low error.
+1. **Trusted links.** Consecutive LEDs that both have a dominant hypothesis, seen by 3 or more segments with low error. If that gives fewer than 30 links (for example with only 4 views), a second tier also accepts 2 segments at a wide angle (20° or more) with a tight fit.
 2. **Base length L.** The upper edge of the bulk of trusted-link lengths: about the 95th percentile, after removing gross outliers. Wires drape, so many links are shorter than the wire, and the upper edge approximates the wire length.
-3. **Per-link bound.** b_i = L·(1 + margin) + 2·√(σ_i² + σ_{i+1}²). This includes both LEDs' uncertainty, so noisy far-away LEDs aren't rejected.
+3. **Per-link bound.** b_i = L·(1 + margin) + min(2·√(σ_i² + σ_{i+1}²), L/2). This includes both LEDs' uncertainty, so noisy far-away LEDs aren't rejected. The allowance is capped, so a badly constrained point can't hide a violation behind its own uncertainty.
 4. **Long links.**
    - A trusted link longer than the normal bound, but no more than 3·L, is a connector between strands. Its bound becomes its measured length plus a margin.
    - If long links repeat at a regular index interval (for example every 50 LEDs), the same interval is predicted where it couldn't be measured.
@@ -807,7 +810,8 @@ server/treelights/
   effects/           TreeGeometry, effect interface, sweep test
   workers.py         process pool and job queue
 web/                 Vite + TypeScript + three.js
-tools/sim/           synthetic tree, virtual WLED, virtual phone, fault scenarios
+server/treelights/sim/  synthetic tree, scene renderer, virtual WLED, virtual phone, synthetic videos, simulated rig
+server/treelights/camcal.py  optional ChArUco camera calibration
 tests/
 docker/              Dockerfile, docker-compose.yml
 ```

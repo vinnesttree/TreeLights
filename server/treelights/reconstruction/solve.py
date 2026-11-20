@@ -10,12 +10,12 @@ import numpy as np
 
 from .. import __version__
 from . import chain, fill as fillmod, hypotheses as hyp, orient
-from .camera import Intrinsics
-from .sfm import Cameras, SegmentObs, solve_cameras, unambiguous
+from .sfm import SegmentObs, solve_cameras, unambiguous
 
 log = logging.getLogger(__name__)
 
 MIN_SEGMENT_OBS = 8
+MIN_RAY_SNR = 15.0
 
 
 class ReconstructionError(Exception):
@@ -156,7 +156,9 @@ def solve(inp: SolveInput, progress=lambda msg: None) -> dict:
     for s in views:
         for led, cands in obs.get(s, {}).items():
             if led not in sel_pos and cands:
-                ray_cands.setdefault(led, []).extend((s, np.array([c["x"], c["y"]])) for c in cands)
+                # A single view can't be cross-checked, so only clearly strong blobs place an LED.
+                strong = [c for c in cands if c.get("snr", 0) >= MIN_RAY_SNR]
+                ray_cands.setdefault(led, []).extend((s, np.array([c["x"], c["y"]])) for c in strong)
     fp, fstatus, fsig = fillmod.fill(n, sel_pos, bounds, views, ray_cands, surface, H_world)
 
     # Visibility-side check on measured LEDs (§9.3).

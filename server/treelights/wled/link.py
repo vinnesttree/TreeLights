@@ -61,6 +61,11 @@ class WledLink:
         if mac:
             self.mac = mac
 
+    async def close(self) -> None:
+        if self._client:
+            await self._client.close()
+            self._client = None
+
     @property
     def client(self) -> WledClient:
         if not self._client:
