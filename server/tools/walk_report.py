@@ -1,6 +1,6 @@
 """Walk-around capture in simulation, checked against ground truth at every stage.
 
-    PYTHONPATH=. python tools/walk_report.py ideal|noisy [n] [duration]
+    PYTHONPATH=. python tools/walk_report.py ideal|noisy [n] [duration] [seed]
 """
 
 import sys
@@ -77,6 +77,7 @@ def run(kind: str = "ideal", n: int = 150, duration: float = 40.0, seed: int = 3
             "decoded_leds": len(res.decoded_leds()),
             "gyro": None if g is None else {"M": g.M.astype(int).tolist(), "inverse": g.inverse, "f": round(g.f, 1),
                                             "delta": round(g.delta, 3), "resid": round(g.residual_px, 2), "base": round(g.baseline_px, 2)},
+            "gyro_cal": res.gyro_cal,
             "identity": identity_check(res, cap, cfg.rec_delay_s),
         }
     t2 = time.time()
@@ -92,7 +93,7 @@ def run(kind: str = "ideal", n: int = 150, duration: float = 40.0, seed: int = 3
     out["solve_s"] = round(time.time() - t2, 1)
     st = np.array([l["status"] for l in m["leds"]])
     ok = st == "measured"
-    Pm = np.array([l["p"] for l in m["leds"]])[ok]
+    Pm = np.array([l["p"] for l, o in zip(m["leds"], ok) if o], float).reshape(-1, 3)
     Y = tree.positions[ok]
     ma, mb = Pm.mean(0), Y.mean(0)
     U, S, Vt = np.linalg.svd((Pm - ma).T @ (Y - mb))
@@ -114,4 +115,5 @@ def run(kind: str = "ideal", n: int = 150, duration: float = 40.0, seed: int = 3
 
 if __name__ == "__main__":
     a = sys.argv[1:]
-    run(a[0] if a else "ideal", int(a[1]) if len(a) > 1 else 150, float(a[2]) if len(a) > 2 else 40.0)
+    run(a[0] if a else "ideal", int(a[1]) if len(a) > 1 else 150, float(a[2]) if len(a) > 2 else 40.0,
+        seed=int(a[3]) if len(a) > 3 else 3)

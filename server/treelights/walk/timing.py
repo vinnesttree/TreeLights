@@ -17,7 +17,9 @@ import numpy as np
 from .pattern import CYCLE_SLOTS, CYCLE_T, T_SLOT, template
 
 WINDOW_S = 4.0
-EDGE = 0.15  # fraction of a slot at each end that is ambiguous (transition, exposure)
+MAX_DRIFT = 2e-4  # s/s
+EDGE = 0.15  # fraction of a slot at each end that may mix with its neighbour (transition, exposure)
+RAMP = 0.06  # half-width of the modelled transition, as a fraction of a slot (~12 ms: exposure)
 
 
 def normalize(t: np.ndarray, flux: np.ndarray) -> np.ndarray:
@@ -37,18 +39,30 @@ def _cost(t: np.ndarray, r: np.ndarray, offset: np.ndarray) -> np.ndarray:
 
     Sync slots are fixed at 1 (all bright) and 0 (off); the level of code slots is
     fitted per offset, because bright LEDs saturating in the camera lose flux and
-    move it away from the nominal (1 + DIM) / 2."""
+    move it away from the nominal (1 + DIM) / 2. Near a slot boundary the prediction
+    ramps linearly between the two slots (exposure and rolling shutter mix them), so
+    the cost keeps changing as the offset moves by a few ms: ignoring those frames
+    instead leaves a flat-bottomed cost and an arbitrary offset within ~EDGE of a slot."""
     u = (t[None, :] - offset[:, None]) / T_SLOT
     k = np.floor(u).astype(int)
     ph = u - k
-    w = ((ph > EDGE) & (ph < 1 - EDGE)).astype(float)
-    pred = template(k)
-    code = (pred > 0.01) & (pred < 0.99)
-    wc = w * code
+    core = (ph > EDGE) & (ph < 1 - EDGE)
+    here = template(k)
+    code = (here > 0.01) & (here < 0.99)
+    wc = core * code
     level = (wc * r[None, :]).sum(axis=1) / np.maximum(wc.sum(axis=1), 1)
-    level = np.clip(level, 0.3, 0.95)
-    pred = np.where(code, level[:, None], pred)
-    return (w * (r[None, :] - pred) ** 2).sum(axis=1) / np.maximum(w.sum(axis=1), 1)
+    level = np.clip(level, 0.3, 0.95)[:, None]
+
+    def lv(kk):
+        p = template(kk)
+        return np.where((p > 0.01) & (p < 0.99), level, p)
+
+    a = lv(k)
+    # Blend weight of the neighbouring slot: 0.5 at the boundary, 0 beyond RAMP.
+    w_prev = np.clip(0.5 - ph / (2 * RAMP), 0, 0.5)
+    w_next = np.clip(0.5 - (1 - ph) / (2 * RAMP), 0, 0.5)
+    pred = a * (1 - w_prev - w_next) + lv(k - 1) * w_prev + lv(k + 1) * w_next
+    return ((r[None, :] - pred) ** 2).mean(axis=1)
 
 
 @dataclass
@@ -101,15 +115,15 @@ def estimate(t: np.ndarray, flux: np.ndarray) -> Timing:
         P = np.array(pts)
         a = float(np.median(P[:, 1]))
         if len(P) >= 4:
-            # Clock drift between phone and server is tiny (well under 0.1%); a larger
-            # slope would be fitting noise.
+            # Clock drift between phone and server is tiny (crystal clocks: tens of ppm);
+            # a larger slope would be fitting noise.
             b_fit, a_fit = np.polyfit(P[:, 0], P[:, 1], 1)
-            if abs(b_fit) <= 0.001:
+            if abs(b_fit) <= MAX_DRIFT:
                 resid = np.abs(P[:, 1] - (a_fit + b_fit * P[:, 0]))
                 keep = resid < 0.03
                 if keep.sum() >= 4:
                     b_fit, a_fit = np.polyfit(P[keep, 0], P[keep, 1], 1)
-                    if abs(b_fit) <= 0.001:
+                    if abs(b_fit) <= MAX_DRIFT:
                         a, b = float(a_fit), float(b_fit)
     ok = contrast < 0.4 and len(pts) >= 1
     return Timing(float(a), float(b), contrast, len(pts), bool(ok))

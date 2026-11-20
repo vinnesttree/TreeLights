@@ -7,10 +7,12 @@ import { mapPage } from "./pages/map";
 import { testPage } from "./pages/test";
 import { homePage } from "./pages/home";
 import { camcalPage } from "./pages/camcal";
+import { scanPage } from "./pages/scan";
 
 const routes: Record<string, () => Page> = {
   "": homePage,
   setup: setupPage,
+  scan: scanPage,
   calibrate: calibratePage,
   control: controlPage,
   map: mapPage,

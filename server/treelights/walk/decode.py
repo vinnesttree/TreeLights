@@ -20,7 +20,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..detection import binary
-from .pattern import CYCLE_SLOTS, CYCLE_T, N_BITS, SYNC, T_SLOT, decode_bits, slot_info
+from .pattern import CYCLE_SLOTS, CYCLE_T, N_BITS, SYNC, T_SLOT, decode_votes, slot_info
 from .timing import Timing
 from .tracking import TrackSet
 
@@ -28,6 +28,8 @@ PHASE_LO, PHASE_HI = 0.2, 0.8
 MISSING_DIM_STRENGTH = 0.4
 CONFLICT_STRENGTH = 0.15
 TRIM_RUN = 3
+WHOLE_TRACK_AGREEMENT = 0.85
+MIN_GOOD_VOTES = 6  # strong votes for a cycle to confirm an identity on its own
 
 
 @dataclass
@@ -90,15 +92,55 @@ def decode_track(rows: np.ndarray, frame_t: np.ndarray, timing: Timing, n_leds: 
                 pieces[-1][1].setdefault(b, []).append(vs)
         else:
             pieces.append(([c], {b: [vs] for b, vs in cyc.items()}))
+    # No swap at all is the common case: try the whole track first.
+    if len(pieces) > 1:
+        whole: dict[int, list[tuple[bool, float]]] = {}
+        for c in cycles:
+            for b, vs in cycles[c].items():
+                whole.setdefault(b, []).append(vs)
+        idx, info = decode_votes(whole, n_leds, len(cycles))
+        if idx is not None and info["weakest"] >= WHOLE_TRACK_AGREEMENT:
+            pieces = [(sorted(cycles), whole)]
     out = []
+    table = binary.code_table(n_leds)
     for cs, votes in pieces:
-        idx, info = decode_bits(votes, n_leds)
+        idx, info = decode_votes(votes, n_leds, len(cs))
         if idx is None:
             continue
         n_pairs = sum(len(v) for v in votes.values())
-        t0, t1 = _trim(cs, cycles, binary.code_table(n_leds)[idx] if idx < n_leds else None)
-        if t1 > t0:
-            out.append(Identity(idx, n_pairs, float(info.get("weakest", 0.0)), t0, t1))
+        for run in _consistent_runs(cs, cycles, table[idx]):
+            t0, t1 = _trim(run, cycles, table[idx])
+            if t1 > t0:
+                out.append(Identity(idx, n_pairs, float(info.get("weakest", 0.0)), t0, t1))
+    return out
+
+
+def _consistent_runs(cs: list[int], cycles: dict, code: np.ndarray) -> list[list[int]]:
+    """Split a decoded piece into runs of cycles that each agree with its codeword.
+
+    A cycle is good when enough of its strong votes were seen and at most one disagrees,
+    bad when two or more disagree (two LEDs' codes differ in at least 4 bits, so after a
+    swap most cycles show several), and weak otherwise. Runs never contain a bad cycle,
+    and start and end on good cycles: the decode as a whole can be right while the
+    track spent part of its time on another LED."""
+    status = []
+    for c in cs:
+        agrees = [bool(v) == bool(code[b]) for b, (v, s) in cycles.get(c, {}).items() if s >= CONFLICT_STRENGTH]
+        dis = agrees.count(False)
+        status.append("bad" if dis >= 2 else "good" if len(agrees) >= MIN_GOOD_VOTES else "weak")
+    runs, cur = [], []
+    for c, st in zip(cs, status):
+        if st == "bad":
+            runs.append(cur)
+            cur = []
+        else:
+            cur.append((c, st))
+    runs.append(cur)
+    out = []
+    for r in runs:
+        good = [k for k, (_c, st) in enumerate(r) if st == "good"]
+        if good:
+            out.append([c for c, _st in r[good[0] : good[-1] + 1]])
     return out
 
 

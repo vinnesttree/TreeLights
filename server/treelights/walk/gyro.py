@@ -6,15 +6,16 @@ depends on the platform, the screen orientation and the sensor's quaternion
 convention, and getting it wrong would silently corrupt everything. So it isn't
 assumed: the mapping (one of the 24 axis-aligned rotations, for both quaternion
 conventions), the focal length and the sensor-to-frame time offset are chosen
-to best predict how tracked LEDs move between consecutive frames, using
-rotation-only homographies. If no mapping predicts the motion clearly better
-than "no rotation", the gyro is not used.
+so that the sensor's rotations between frames a few seconds apart agree with the
+rotations recovered from the images (essential matrices of the tracked LEDs).
+The gyro is used only if one mapping clearly beats every mapping that would
+predict something different, and beats "no rotation".
 """
 
 from __future__ import annotations
 
 import itertools
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -89,6 +90,7 @@ class GyroModel:
     baseline_px: float  # residual predicting no rotation
     ok: bool
     size: int = 0  # longer image side the focal length refers to
+    info: dict = field(default_factory=dict)  # calibration diagnostics
 
     def R_cam(self, q: np.ndarray) -> np.ndarray:
         """World -> camera rotation for a sensor quaternion."""
@@ -204,6 +206,39 @@ def _angle_deg(R: np.ndarray) -> float:
     return float(np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))))
 
 
+def _refine_delta(rows, frame_t, log_t, log_q, M, inverse, f, cx, cy, span, d0) -> float:
+    pairs = collect_long_pairs(rows, frame_t, gap_s=SHORT_GAP_S, step_s=max(0.25, span / 150), max_pairs=150)
+    if len(pairs) < 20:
+        return d0
+    img = _image_rotations(pairs, f, cx, cy)
+    used = sorted({i for a, b, _p, _q in pairs for i in (a, b)})
+
+    def cost(delta: float) -> float:
+        Rs = {i: quat_to_R(q) for i, q in zip(used, slerp_log(log_t, log_q, frame_t[used] + delta))}
+        d = []
+        for (a, b, _p, _q), Ri in zip(pairs, img):
+            if Ri is not None:
+                Ra = M @ (Rs[a] if inverse else Rs[a].T)
+                Rb = M @ (Rs[b] if inverse else Rs[b].T)
+                d.append(_angle_deg(Ri.T @ (Rb @ Ra.T)))
+        return float(np.mean(np.minimum(d, 5.0))) if len(d) >= 10 else np.inf
+
+    grid = np.arange(-0.15, 0.1501, 0.01)
+    c = np.array([cost(float(x)) for x in grid])
+    k = int(np.argmin(c))
+    # Only move when the short pairs clearly prefer another offset (a steady walk
+    # without jitter leaves the cost flat).
+    c0 = cost(d0)
+    if not np.isfinite(c[k]) or c0 - c[k] < 0.02:
+        return d0
+    return float(grid[k])
+
+
+SHORT_GAP_S = 0.5
+GAPS_S = (3.0, 2.0, 1.0)
+MIN_PAIRS = 20
+
+
 def calibrate(rows: np.ndarray, frame_t: np.ndarray, log_t: np.ndarray, log_q: np.ndarray, width: int, height: int,
               f_prior: float | None = None) -> GyroModel:
     """Choose the device->camera mapping, focal length and time offset under which the
@@ -215,8 +250,19 @@ def calibrate(rows: np.ndarray, frame_t: np.ndarray, log_t: np.ndarray, log_q: n
     size = max(width, height)
     cx, cy = (width - 1) / 2, (height - 1) / 2
     none = GyroModel(DEFAULT_M, False, f_prior or 0.7 * size, 0.0, np.inf, np.inf, False, size)
-    pairs = collect_long_pairs(rows, frame_t)
-    if len(pairs) < 6 or log_t is None or len(log_t) < 10:
+    if log_t is None or len(log_t) < 10 or len(rows) == 0:
+        return none
+    # The longest gap that still gives enough pairs: rotations of 20-30 degrees separate
+    # the mappings far better than the ~8 degrees of a 1 s gap (when the walk is steady,
+    # wrong mappings differ from the right one only by the camera's small pitch, an
+    # error that grows with the rotation compared). Pairs are spread over the whole walk.
+    span = float(np.ptp(frame_t[np.unique(rows[:, 1].astype(int))]))
+    pairs = []
+    for gap in GAPS_S:
+        pairs = collect_long_pairs(rows, frame_t, gap_s=gap, step_s=max(0.5, (span - gap) / 60))
+        if len(pairs) >= MIN_PAIRS:
+            break
+    if len(pairs) < 6:
         return none
     used = sorted({i for a, b, _p, _q in pairs for i in (a, b)})
 
@@ -237,12 +283,15 @@ def calibrate(rows: np.ndarray, frame_t: np.ndarray, log_t: np.ndarray, log_q: n
     f_grid = [f_prior] if f_prior else list(size * np.array([0.45, 0.55, 0.65, 0.75, 0.9, 1.1, 1.35]))
     Rd0 = sensor(0.0)
     best = (np.inf, None)
+    per_mapping: dict[tuple, float] = {}  # best score of each (mapping, convention)
     img_cache = {}
     for f in f_grid:
         img_cache[f] = _image_rotations(pairs, f, cx, cy)
         for inverse in (False, True):
-            for M in CANDIDATES:
+            for mi, M in enumerate(CANDIDATES):
                 sc = score(img_cache[f], Rd0, M, inverse)
+                key = (mi, inverse)
+                per_mapping[key] = min(per_mapping.get(key, np.inf), sc)
                 if sc < best[0]:
                     best = (sc, (M, inverse, f))
     if best[1] is None:
@@ -259,8 +308,45 @@ def calibrate(rows: np.ndarray, frame_t: np.ndarray, log_t: np.ndarray, log_q: n
         sc = score(img_cache[f], sensor(float(delta)), M, inverse)
         if sc < s0 - 1e-6:
             s0, best_d = sc, float(delta)
+    # The time offset hardly changes rotations over seconds of steady turning; hand
+    # jitter over short gaps shows it. Refine it there once the mapping is known.
+    best_d = _refine_delta(rows, frame_t, log_t, log_q, M, inverse, f, cx, cy, span, best_d)
     # Baseline: how much the camera actually rotated (vs. claiming no rotation).
     base = [(_angle_deg(Ri)) for Ri in img_cache[f] if Ri is not None]
     baseline = float(np.median(base)) if base else 0.0
-    ok = bool(s0 < 1.5 and baseline > 2.5 * s0 and baseline > 2.0)
-    return GyroModel(M, inverse, float(f), best_d, s0, baseline, ok, size)
+    # Accept when the chosen mapping clearly beats every mapping that would predict
+    # something different, and beats "no rotation". While walking around the tree the
+    # camera turns mostly about the vertical, so mappings that differ only by a turn
+    # about that axis fit equally well; they predict the same relative rotations and
+    # the same "up", so they are equivalent for every use here and don't count as rivals.
+    Rd = sensor(best_d)
+    used_pairs = [(a, b) for (a, b, _p, _q), Ri in zip(pairs, img_cache[f]) if Ri is not None]
+
+    def cam(Mx, inv, i):
+        return Mx @ (Rd[i] if inv else Rd[i].T)
+
+    def predictions(Mx, inv):
+        return [cam(Mx, inv, b) @ cam(Mx, inv, a).T for a, b in used_pairs]
+
+    up_frames = used[:: max(1, len(used) // 20)]
+    z = np.array([0.0, 0.0, 1.0])
+    P0 = predictions(M, inverse)
+    up0 = [cam(M, inverse, i) @ z for i in up_frames]
+    equiv_tol = max(0.5, s0)
+    runner_up = np.inf
+    for (mi, inv), sc in per_mapping.items():
+        Mx = CANDIDATES[mi]
+        if inv == inverse and np.allclose(Mx, M):
+            continue
+        if sc >= runner_up:
+            continue
+        P = predictions(Mx, inv)
+        dpred = float(np.median([_angle_deg(A.T @ B) for A, B in zip(P0, P)])) if P else np.inf
+        dup = max(float(np.degrees(np.arccos(np.clip(u0 @ (cam(Mx, inv, i) @ z), -1, 1)))) for u0, i in zip(up0, up_frames))
+        if dpred < equiv_tol and dup < 3.0:
+            continue  # equivalent
+        runner_up = sc
+    ok = bool(s0 < 3.0 and runner_up > 1.5 * s0 and baseline > 2.5 * s0 and baseline > 2.0)
+    info = {"pairs": len(used_pairs), "gap_s": round(float(frame_t[pairs[0][1]] - frame_t[pairs[0][0]]), 2), "score_deg": round(s0, 3), "runner_up_deg": round(float(runner_up), 3),
+            "baseline_deg": round(baseline, 3)}
+    return GyroModel(M, inverse, float(f), best_d, s0, baseline, ok, size, info)

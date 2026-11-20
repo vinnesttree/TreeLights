@@ -87,3 +87,11 @@ td, th { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--bord
   .topbar { padding: 8px 12px; }
   nav a { padding: 6px 8px; }
 }
+
+/* Walk-around scan */
+.cam-wrap.walk { max-height: 70vh; }
+.cam-wrap.walk video { max-height: 70vh; object-fit: contain; }
+.cam-wrap canvas.ring { position: absolute; top: 8px; right: 8px; width: 33%; max-width: 160px; height: auto; aspect-ratio: 1; pointer-events: none; }
+.walk-warn { position: absolute; left: 8px; right: 8px; top: 8px; margin-right: min(36%, 172px); color: #fff; font-weight: 600; text-shadow: 0 1px 4px #000; font-size: .95rem; }
+.walk-warn:empty { display: none; }
+button.big { padding: 14px 22px; font-size: 1.1rem; margin-top: 10px; }

@@ -1,19 +1,19 @@
 # TreeLights
 
-TreeLights finds the 3D position of every addressable LED on a Christmas tree using an Android phone's camera in Chrome. The LEDs are driven through stock WLED, and everything runs in one Docker container on a Linux computer on your network.
+TreeLights finds the 3D position of every addressable LED on a Christmas tree using an Android phone's camera in Chrome. You walk once around the tree with the camera running while every LED blinks its own index; the phone's orientation sensor tells which side of the tree each frame sees. The LEDs are driven through stock WLED, and everything runs in one Docker container on a Linux computer on your network.
 
 The result is a 3D map of the tree. The map stores the wiring order, a per-LED uncertainty and a surface model, so 3D effects can be built on it. For now there is one test animation that sweeps planes and a sphere through the tree.
 
 The design, including a failure analysis and how each failure is handled, is in [`architecture.md`](architecture.md).
 
-> **Status:** everything is built and tested in a closed-loop simulator. The simulator includes a virtual WLED reached over real DDP/UDP, a virtual phone over WebSockets, packet loss, camera bumps, reflections and recorded videos. It has **not yet been run against a real tree, ESP32 or phone**. Expect some tuning on first use (§18 step 11 in the architecture).
+> **Status:** everything is built and tested in a closed-loop simulator. The simulator includes a virtual WLED reached over real DDP/UDP, a virtual phone walking around the tree over WebSockets (with hand jitter, motion blur, sensor drift and noise, dropped frames), packet loss, camera bumps, reflections and recorded videos. It has **not yet been run against a real tree, ESP32 or phone**. Expect some tuning on first use (§18 step 11 in the architecture).
 
 ## What you need
 
 - **Linux host with Docker.** It runs the container with host networking.
 - **ESP32 running WLED 0.14 or newer**, driving the LED string. TreeLights doesn't modify the firmware.
-- **Android phone with Chrome** on a tripod or stand.
-- **Optional:** a second device (phone or computer) to start each view without touching the tripod phone.
+- **Android phone with Chrome.** Room to walk around the tree, about 1.5–2 m away from it.
+- **Optional, for the tripod mode only:** a tripod, and a second device to start each view.
 
 ## Install
 
@@ -42,25 +42,29 @@ docker compose -f docker/docker-compose.yml logs treelights   # shows the URL an
    - Find or enter the controller and run the checks.
    - Enter the **tree height in cm, from the lowest light to the highest light**. It only sets the map's units.
    - Optionally run *Index chase* to confirm the whole string lights.
-2. **Camera calibration (optional, once per phone).** Show the board on a computer screen and capture about 15 views with the phone.
-3. **Calibrate (tripod phone).** Open the Calibrate page on the phone on the tripod.
-   1. Start the camera, light the tree, then tap *Lock camera*.
-   2. Keep the screen on. Fullscreen also locks the orientation.
-4. **Each view.**
-   1. Turn the tree by the suggested angle (about 45°) and step out of the picture.
-   2. Start the view from the **Control** page on another device, or from the tripod phone with its 5 s countdown.
-   3. The server waits until the tree stops swaying, then captures for about 30–60 s.
-   4. Repeat for about 8 views (one full turn), until the guidance says coverage looks good.
-5. **Solve.** Use *Solve map* on the Control page.
-6. **Map.** Review the 3D map and its quality report.
+2. **Scan.** Open the **Scan** page on the phone.
+   1. Dim the room. Stand far enough back that the whole tree fits in the picture.
+   2. Tap *Start* and allow the camera and motion sensors. All LEDs start blinking.
+   3. Walk slowly, at an even pace, once around the tree (about a minute), holding the phone upright with the tree in the middle of the picture. The ring fills in as you go and turns green where enough LEDs were identified. Heed the warnings: *slow down*, *step back*, *point at the tree*.
+   4. Back at the start, tap *Stop*. The recording uploads (it resumes if interrupted) and the map is built from the recording together with the frames streamed live.
+3. **Map.** Review the 3D map and its quality report.
    - Tap an LED to blink it on the real tree.
    - Fix problems by marking an LED bad, moving it, or adding or removing a chain break, then re-solve.
    - *Activate* the version you want. The previous one stays available for roll-back.
-7. **Test.** Run the sweep test and check it looks clean on the tree. *Status colors* shows which LEDs were measured (green), placed from one view (yellow), estimated (orange) or are unknown (off).
+4. **Test.** Run the sweep test and check it looks clean on the tree. *Status colors* shows which LEDs were measured (green), placed from one view (yellow), estimated (orange) or are unknown (off).
 
-**Video mode (fallback).** If live capture doesn't work, use *Play sequence* on the Calibrate page and record it with the phone's own camera app (Pro mode with fixed focus and exposure is best). Then upload the recording. The upload resumes if interrupted.
+**Advanced: tripod capture.** For a tree that can be turned, or one you can't walk around (see *Advanced* on the home page):
+1. *Camera calibration* (optional, once per phone): show the board on a computer screen and capture about 15 views.
+2. *Calibrate* on the tripod phone: start the camera, light the tree, tap *Lock camera*.
+3. For each view, turn the tree by the suggested angle (about 45°), step out of the picture and start the view from *Control* on another device (or with the 5 s countdown). Repeat for about 8 views, then *Solve map*.
+4. *Video mode*: if live capture doesn't work, use *Play sequence* on the Calibrate page, record it with the phone's camera app and upload it.
 
 ## How it stays robust (short version)
+
+- **Walking needs no clock sync.** The blinking pattern's timing is read from the frames themselves, so phone, server and WLED clocks and the camera's latency don't matter. LEDs are never off while their bits are sent, so each can be followed from frame to frame while you move.
+- **The orientation sensor is checked, not trusted.** How the phone's sensor axes map to the camera is worked out from the video (every mapping is tried). The sensor is used only if one mapping clearly fits; otherwise the walk is mapped from the images alone.
+- **LED identities are checked cycle by cycle.** A track that jumps to a neighbouring LED is split there, and each part must agree with its code in every 7.2 s cycle it covers.
+- **Two sources.** The recording gives full-rate frames; the live stream gives feedback during the walk and is a complete fallback if the upload fails.
 
 - **Captures check themselves.** A rotating color per step, exactly one new blob, never where a recent LED was, and a sanity check on the frame. A lost UDP packet or a slow camera gives a rejected frame, never a wrong LED identity.
 - **Fast first pass.** All LEDs blink Hamming-coded indices, and every decoded index is spot-checked. One-at-a-time capture fills the gaps.
@@ -87,11 +91,13 @@ cd web && npm ci && npm run build                         # web app -> web/dist
 
 # Run locally without TLS, then drive it with the simulated rig (virtual WLED + phone + turning tree):
 cd server && ../.venv/bin/python -m treelights --data /tmp/tl --web ../web/dist --no-tls --https-port 18443
-../.venv/bin/python -m treelights.sim.rig --server http://127.0.0.1:18443 --n 600 --views 8
+../.venv/bin/python -m treelights.sim.virtual_walker --server http://127.0.0.1:18443 --n 150    # walk around (add --ideal for no noise)
+../.venv/bin/python -m treelights.sim.rig --server http://127.0.0.1:18443 --n 600 --views 8      # tripod: turning tree
 
 # Detection and full-pipeline accuracy with branch occlusion, scattered light and needle glints:
 PYTHONPATH=. ../.venv/bin/python tools/occlusion_report.py      # per-LED detection vs ground truth
 PYTHONPATH=. ../.venv/bin/python tools/foliage_e2e.py 1         # capture + solve, errors in cm
+PYTHONPATH=. ../.venv/bin/python tools/walk_report.py noisy 150 50   # walk-around: every stage vs ground truth (or: ideal)
 ```
 
 Layout:
@@ -99,7 +105,8 @@ Layout:
 - `server/treelights/`
   - `wled/`: DDP, JSON API, discovery, monitor
   - `output/`: lease and keepalive thread
-  - `capture/`: live session, scan store, video mode
+  - `walk/`: walk-around capture (pattern, timing, tracking, gyro calibration, decoding, session, job)
+  - `capture/`: tripod live session, scan store, video mode
   - `detection/`
   - `reconstruction/`
   - `maps/`
@@ -113,6 +120,9 @@ Layout:
 | Symptom | What to check |
 |---|---|
 | Camera page says it needs HTTPS | Open the `https://…:8443` address, not `http://`. |
+| Scan: "the blinking pattern isn't being picked up" | Point the camera at the tree and dim other lights. Check the Setup page's realtime check. |
+| Scan: few LEDs identified on one side | Walk that side again more slowly, or start a new scan. LEDs hidden from every side are placed from the wiring and marked *estimated*. |
+| "The orientation sensor didn't match the camera motion" | The map is still built from the images. Hold the phone upright and don't rotate the screen during the walk. |
 | Realtime check fails | WLED Sync settings: *Receive UDP realtime* on. Nothing else (Home Assistant, xLights, another sender) should be streaming to WLED. |
 | Many rejected frames, wait time keeps growing | Weak WiFi. Put the phone on 5 GHz if possible, and move the router or the ESP32 closer. |
 | "The picture keeps moving" | Check the tripod. Let the tree settle after turning it. Keep people and pets out of the picture. |

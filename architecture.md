@@ -1,12 +1,13 @@
 # TreeLights — Architecture
 
-**Status: DRAFT 3 — approved and implemented.** Build steps 1–10 of §18 are done and tested in simulation. Step 11, validation on your real tree, is still to do. Changes made during implementation are noted where they apply.
+**Status: DRAFT 4 — implemented.** Draft 4 makes walking around the tree with the phone the default way to capture (§7.1, §7.9). Build steps 1–10 and 12 of §18 are done and tested in simulation. Step 11, validation on your real tree, is still to do. Changes made during implementation are noted where they apply.
 
 | Revision | Changes |
 |---|---|
 | Draft 1 | Initial proposal. |
 | Draft 2 | Records your decisions (§1). Adds a failure analysis of draft 1 (§3) and reworks the design to handle each failure. Narrows this build to detection, mapping and one test animation. |
 | Draft 3 (approved) | The phone stays on a tripod and the tree is turned between views (§7.1). Chrome's certificate warning is accepted; installing the CA is optional (§6.3). Dynamic `d_max` as in §10.1 confirmed. |
+| Draft 4 | **Walk-around capture** replaces the tripod as the default (§7.1, §7.9). You walk once around the tree with the camera running: a live capture, not discrete pictures. The phone's orientation sensor tells which side of the tree each frame sees. The server uses both the frames streamed live during the walk and the full-rate recording uploaded at the end. A failure analysis for walking is in §3. The tripod modes stay available as an advanced option. |
 
 ## 1. Decisions
 
@@ -16,7 +17,7 @@
 | Distance bound between consecutive LEDs (`d_max`) | **Dynamic.** Learned from the measurements for each link of the chain, not typed in (§10). |
 | Reference length | The tree's height, measured from the lowest light to the highest light (§9.10). |
 | Phone | Android, using the Chrome browser. No native app. |
-| Capture setup | The phone stays fixed on a tripod. The tree is turned between views. |
+| Capture setup | **Draft 4:** you walk once around the tree holding the phone, with the camera running continuously (§7.9). The orientation sensor (gyroscope and accelerometer) gives each frame's viewing direction, "up", and the rotation between frames. Frames streamed live give feedback during the walk; the full-rate recording, uploaded afterwards, is decoded together with them. *Draft 3's tripod capture, with the tree turned between views, remains as an advanced option (§7.1).* |
 | HTTPS | Chrome's warning for the server's certificate is acceptable. It appears when the page is opened, never per camera frame. Installing the CA is optional. |
 | Host | Linux, Docker with host networking. |
 | Stack | Python backend (FastAPI, OpenCV, numpy, scipy). TypeScript + three.js web app. |
@@ -118,6 +119,30 @@ This section lists what would go wrong if draft 1 were built as written, and wha
 | F30 | Draft 1 kept versions, but a worse map could still replace a good one, and coordinates could jump between versions. | Effects break after a re-scan. | Quality gates, explicit activation, and alignment to the previous map (§11.1, §11.2, §9.10). |
 | F31 | The tree changes over days: branches sag, or the tree gets bumped. | The map slowly goes wrong. | Quick partial re-scan, merged into a new version (§11.5). |
 
+### Walk-around capture (draft 4)
+
+Walking around the tree changes almost every assumption the tripod design relied on. What goes wrong, and how draft 4 handles it:
+
+| Problem | Handling |
+|---|---|
+| The camera never stands still, so LEDs can't be lit one at a time and frames can't be compared pixel by pixel. | Every LED blinks its own index at the same time, in a repeating 7.2 s cycle (§7.9). In the code slots an LED is only ever bright or dim, never off, so it can be followed from frame to frame while the phone moves. |
+| Phone, server and WLED clocks differ, and the camera adds unknown latency. | No clock synchronisation is needed. The pattern's timing is read from the images themselves: each frame's total LED brightness is matched against the cycle's known on/off/dim sequence. Latency is included automatically. |
+| A tracked LED swaps onto a neighbour as the two pass close together in the picture. | Bits are decided per cycle by comparing two slots 0.2 s apart. A track is split where its cycles start to contradict each other. Each part is decoded on its own and must agree with its codeword cycle by cycle. Soft decisions are only accepted with two or more consistent cycles (§7.9). |
+| How the phone's sensor axes and quaternion convention map onto the camera depends on the phone and the browser. A wrong guess would silently corrupt every view. | Nothing is assumed. All 24 axis mappings and both quaternion conventions are tried, together with the focal length and the time offset between sensor and frames. They are scored against rotations recovered from the images, between frames about 3 s apart. The sensor is used only if one mapping clearly beats every mapping that would predict something different. Otherwise the walk is mapped from the images alone. |
+| A steady walk turns the phone only about the vertical, so several mappings explain the motion nearly equally. | Mappings that predict the same rotations and the same "up" are equivalent for every use, and are not counted as rivals. Comparing over 3 s gaps instead of 1 s makes the remaining difference, the camera's pitch, three times larger. |
+| The sensor's heading drifts, and its zero is arbitrary. | Only rotations over a few seconds and the gravity direction are used, never an absolute heading. The heading only colours the coverage ring on the phone. |
+| A gyro prediction can do worse than none when frames are far apart: the live stream runs at ~8 frames/s, and walking moves the image as much as turning does. | Each source is tracked both with and without the gyro's prediction, and the result that identifies more detections is kept. |
+| Motion blur from walking or turning too fast. | Exposure is locked short. Keyframes are scored by sharpness and by the gyro's turning rate. The phone warns when you turn faster than ~35°/s. |
+| WiFi drops live frames, or the phone disconnects. | The recording is the main source; live frames are feedback and a backup. The server keeps the walk running for 15 s while the phone reconnects. The upload resumes where it stopped. |
+| The upload fails, or the browser can't record. | The map is built from the live frames alone. Without noise that is as good as with the recording; with every simulated fault it measures fewer LEDs and is less reliable (§17), so the phone retries the upload first. |
+| LEDs saturate up close, or are too faint from far away. | The server adjusts the pattern's brightness from what the live frames show. Changes are only made between cycles, so a bit's two slots are always compared at the same brightness. |
+| Light scattered onto branches, glints, a TV or a lamp. | Static lights never decode, since they don't follow the pattern. Scattered light decodes as the LED it comes from, so it carries the right identity at the wrong place. The detector marks it diffuse and the multi-view fit sets it aside, as in the tripod design (§8.1, §9.5). |
+
+**Residual risks of walking:**
+- **A tree against a wall can't be walked around.** A partial walk still maps the side that was seen. The rest is filled from the wiring and labelled `estimated`, or the tripod mode is used.
+- **Turning the phone between portrait and landscape mid-walk** changes the sensor-to-camera mapping. The page locks the orientation in fullscreen where Chrome allows it, and asks you to hold the phone upright.
+- **Rooms too small to step back** leave LEDs at the edge of the picture. The phone warns, and LEDs that leave the picture are tracked again when they return.
+
 ### Residual risks of this design
 
 These are the risks this draft adds or can't fully remove, and how each one is limited:
@@ -133,13 +158,13 @@ These are the risks this draft adds or can't fully remove, and how each one is l
 ```mermaid
 flowchart LR
   subgraph Phone["Android phone - Chrome"]
-    CAP["Calibrate page<br/>camera + motion sensors"]
+    CAP["Scan page (walk-around)<br/>camera, recorder, orientation sensor<br/>or Calibrate page (tripod)"]
     UI["Setup / Map / Test pages"]
   end
   subgraph Host["Linux host - Docker, host network"]
     subgraph Main["Main process - light work only"]
       API["FastAPI<br/>HTTPS, REST, WebSockets"]
-      SES["Capture sessions<br/>state machines"]
+      SES["Capture sessions<br/>walk-around and tripod"]
       MON["WLED monitor"]
     end
     OUT["Output thread<br/>lease, keepalive, test animation, DDP"]
@@ -150,7 +175,8 @@ flowchart LR
     DATA[("/data volume<br/>scans, maps, certificates, config")]
   end
   WLED["ESP32 with stock WLED"] --> LEDS["~600 LEDs on the tree"]
-  CAP <-->|WSS commands and frames| API
+  CAP <-->|WSS frames, orientation, status| API
+  CAP -->|HTTPS resumable video upload| API
   UI <-->|HTTPS and WSS| API
   API --- SES
   SES --> OUT
@@ -262,17 +288,27 @@ Chrome only allows camera access on secure (HTTPS) pages. The setup works like t
 ### 7.1 User flow
 
 1. **Setup:** pick the WLED controller, run the checks, enter the tree height.
-2. **Camera calibration** (optional, once per phone, §9.2).
-3. **Calibrate.** The phone stays on a tripod, aimed at the tree, for the whole scan. For each view:
+2. **Scan (draft 4, the default).** Open the Scan page on the phone and walk once around the tree with the camera running (§7.9):
+   1. Dim the room, and stand far enough back that the whole tree fits in the picture.
+   2. Tap **Start**. Every LED starts blinking its own index. The camera locks exposure and focus, recording starts, and frames stream to the server.
+   3. Walk slowly once around the tree, about a minute, keeping the tree in the middle of the picture. A ring on the screen fills in as each side is covered and turns green once enough LEDs there are identified. Warnings appear for turning too fast, LEDs out of the picture, or the pattern not being found.
+   4. Back at the start, tap **Stop**. The recording uploads, and the server decodes it together with the live frames and builds the map.
+3. **Map:** review, run the sweep test, activate (step 5 below).
+
+**Advanced: tripod capture (draft 3).** For a tree that can be turned, or when walking around it isn't possible:
+1. **Camera calibration** (optional, once per phone, §9.2).
+2. **Calibrate.** The phone stays on a tripod, aimed at the tree, for the whole scan. For each view:
    1. Turn the tree by the angle the app suggests (about 45°), then step out of the picture.
    2. Start the view. Touching the tripod-mounted phone can shake it, so the view can be started from any other browser (laptop or second phone) on the **Control** panel, or from the tripod phone with a 5 s countdown.
    3. The server waits until the scene has settled (§7.5), then captures for about 30–60 s.
    4. Repeat until coverage is good: typically 8 views (one full turn), and at least 4 are required.
 
+   (The text below refers to the tripod steps.)
+
    For the reconstruction, turning the tree in front of a fixed camera is the same as moving the camera around a fixed tree: only LED positions relative to the tree are used. It has two extra benefits:
    - Reflections in mirrors, windows and screens stay fixed relative to the camera while the tree turns, so they don't line up across views in the tree's frame and are rejected by the geometry.
    - Every view is a rotation about the same vertical axis, which gives a strong estimate of "up" and of the tree's axis (§9.4).
-4. **Solve:**
+5. **Solve:**
    - Review the 3D map and its quality report.
    - Run the sweep test on the real tree.
    - Activate the map.
@@ -454,6 +490,66 @@ After each view, a worker quickly rebuilds the map from everything captured so f
 
 The quick reconstruction also predicts which LEDs face the next view, which focuses that view's sequential pass (§7.3).
 
+### 7.9 Walk-around capture
+
+The default capture since draft 4. You walk once around the tree with the phone. The camera runs the whole time, and there are no discrete pictures to take. The server works from two sources of the same walk:
+- **live frames**, about 8 per second, streamed while you walk. They drive the feedback on the phone, and are kept for processing;
+- **the recording**, at the camera's full rate (30 fps), made by the browser at the same time and uploaded at the end.
+
+Both are decoded the same way, and keyframes from both go into one reconstruction.
+
+**The LED pattern.** The pattern repeats every 7.2 s, in 36 slots of 0.2 s each:
+
+| Slots | Content |
+|---|---|
+| 0–3 | Sync: all LEDs bright, off, bright, off. |
+| 4–35 | 16 code bits. Each bit is a pattern slot then its complement: an LED whose bit is 1 is bright then dim, otherwise dim then bright. Dim is 25% of bright. |
+
+- **The code** is the scrambled extended Hamming(16,11) code of the binary pass (§8.2). It has minimum distance 4, so 1–3 wrong bits never give another valid index.
+- **Never off in the code slots.** An LED never goes dark there, so it can be followed between frames while the phone moves. Each bit is decided by comparing the LED's brightness in its two slots. They are 0.2 s apart, so distance, angle and occlusion barely change between them.
+- **Green only:** it is the camera's most sensitive channel.
+- **Brightness** is adjusted between cycles from what the live frames show: lower when more than 30% of LEDs saturate, higher when they are faint.
+
+**What the phone sends** (`/ws/walk`, protocol in `walk/protocol.py`):
+- live frames as JPEG, about 960 px wide, each tagged with its capture time and the latest orientation quaternion;
+- orientation samples at about 60 Hz, from `RelativeOrientationSensor` (gyroscope and accelerometer, without the magnetometer, which LED strings disturb), or the `deviceorientation` event where that sensor isn't available;
+- the time the recording started;
+- after Stop, the recording, as a resumable chunked upload.
+
+All times are on one phone clock (`performance.timeOrigin + performance.now()`).
+
+**Live feedback.** Every 2.5 s the server decodes the live frames received so far, in its own thread, and sends a status:
+- whether the pattern is locked;
+- how many LEDs are identified;
+- for each 30° side of the walk, how many LEDs were identified while the camera faced it, from the orientation sensor;
+- warnings: LEDs at the edge of the picture, hardly any LEDs in view, the pattern not found.
+
+The phone adds its own warning for turning too fast, and draws the coverage ring.
+
+**Processing, per source** (`walk/pipeline.py`):
+1. **Blobs:** local maxima of the green channel above the local background. Each gets its flux, peak, sharpness and a saturation flag.
+2. **Timing:** each frame's total blob flux, normalised over a ±4 s window, is matched against the cycle's expected brightness: sync slots 1 and 0, code slots at a fitted level. Near a slot boundary the expected value ramps between the two slots, which models the exposure. A global search over the 7.2 s cycle is followed by a per-cycle refinement and a fit for clock drift, limited to 200 ppm. In simulation the phase comes out within about 4 ms.
+3. **Tracking, without the gyro:** blobs are associated frame to frame after a voted global shift. Tracks coast through the sync "off" slot and short occlusions. A lost track can be picked up again for up to 2 s.
+4. **Gyro self-calibration** (`walk/gyro.py`):
+   - Rotations between frames about 3 s apart (falling back to 2 s, then 1 s) are recovered from the tracked LEDs with essential matrices.
+   - The sensor's rotations are compared with them under every axis mapping and both quaternion conventions, over a grid of focal lengths.
+   - The time offset between sensor and frames is refined on 0.5 s pairs, where hand jitter makes it visible.
+   - The sensor is used only if the best mapping's error is under 3°, it beats every non-equivalent mapping by 1.5×, and it beats "no rotation" by 2.5×.
+5. **Tracking with the gyro:** each frame's predicted motion is the rotation homography `K·ΔR·K⁻¹` plus the shift voted from the LEDs. The result is kept only if it identifies more detections than tracking without it.
+6. **Decoding** (`walk/decode.py`):
+   1. Per track and per cycle, each bit gets a vote: which of its two slots was brighter, and by how much.
+   2. Consecutive cycles are merged while their votes agree, so a track that swapped LEDs is split where it swapped.
+   3. Each piece is decoded either with hard decisions (every bit reliable, a valid codeword, at most one missing bit), or, if it spans two or more cycles, with soft decisions: the best-scoring LED codeword must explain the votes clearly and beat the runner-up by a margin.
+   4. The identity then covers only runs of cycles that agree with the codeword (at most one disagreeing strong vote per cycle), trimmed to the first and last agreeing votes.
+
+**Fusion and solving.**
+- **Common timeline.** The recording's frames get phone-clock times through the pattern's timeline, which both sources share. So the orientation log can be read for every video frame.
+- **Keyframes.** Up to 48 keyframes are chosen across both sources, one per time window. Each is scored by the number of LEDs identified, their sharpness and the turning rate.
+- **Solving.** Each keyframe becomes a segment for the existing solver (§9): its own camera, the gyro's "up" in that camera, and a focal-length prior from the gyro calibration. From there the solve is the same as for tripod views: robust bundle adjustment, hypotheses, chain selection with dynamic bounds, filling.
+- **Re-solving.** Keyframe observations are stored with the scan (§13), so a re-solve after editing overrides doesn't decode again.
+
+**Measured in simulation:** see §17.
+
 ## 8. 2D detection and decoding
 
 ### 8.1 Single-LED frames
@@ -509,8 +605,9 @@ Random seeds are fixed, so the same scan always produces the same map.
 - **Focal length per segment.** A prior (about 2%) ties each segment's focal length to a shared value. This absorbs focus breathing or a lens switch, which draft 1's single focal length couldn't.
 - **Focal lengths are expressed relative to the longer image side.** Portrait and landscape segments, and different resolutions, are then comparable.
 - **Starting focal length:**
-  - from the optional camera calibration, if done;
+  - from the optional camera calibration, or for a walk, from the gyro self-calibration (§7.9);
   - otherwise, several starts at 55°, 65°, 75° and 85° horizontal field of view, keeping the best solution.
+- **A measured focal length is held while cameras are added** (implementation change, draft 4). When every view sees the tree from about the same distance, as when walking around it, focal length and depth trade off. A free focal length then drifts while segments are added one by one. In simulation, it drifted 20–30% off. The shared value is freed once at the end, and the refinement is kept only if it moves less than 8% and fits better.
 - **Optional camera calibration** (once per phone and resolution):
   - The Setup page shows a ChArUco board full-screen on any computer monitor.
   - The phone captures about 15 images of it from different angles.
@@ -525,7 +622,7 @@ Random seeds are fixed, so the same scan always produces the same map.
 3. **Add the other segments one at a time.**
    - Find each segment's pose with PnP + RANSAC, then triangulate the LEDs it newly adds.
    - After each addition, run bundle adjustment with a robust (Cauchy) loss.
-4. **Multiple starts:** focal-length guesses × the top 3 seed pairs. Keep the solution with the lowest robust error per observation and the most registered segments.
+4. **Multiple starts:** focal-length guesses × the top seed pairs. Keep the solution with the lowest robust error per observation and the most registered segments. A second seed pair is tried even when the first registered every segment, if its fit is poor (rms above 0.8 px). Two keyframes close together on a walk can seed a self-consistent but distorted solution.
 5. **Checks:**
    - **In front:** every point must be in front of the cameras that see it.
    - **Visibility side:** each camera should mostly see LEDs on its own side of the tree. A depth-reversed ("inside-out") solution fails this. LEDs glimpsed through the branches from the far side lower the true share, so the threshold is "clearly above one half": a reversed map scores about one minus the true share.
@@ -534,8 +631,8 @@ Random seeds are fixed, so the same scan always produces the same map.
 ### 9.4 World orientation
 
 **Up axis.** Decided by agreement between independent estimates:
-- **the turning axis:** the tree is turned about a vertical axis, so the relative rotations between views all share one axis. This is the strongest estimate;
-- the phone's gravity vector, rotated into the tree's frame by each camera's pose;
+- **the turning axis:** the tree is turned about a vertical axis (or, walking, the phone is carried around one), so the relative rotations between views all share one axis. This is the strongest estimate;
+- the phone's gravity vector, rotated into the tree's frame by each camera's pose (walking: the calibrated orientation sensor's "up" for each keyframe);
 - the average camera "up" direction, since a tripod-mounted phone is roughly upright;
 - the normal of the plane through the camera positions, which lie on a circle around the tree;
 - the long axis of the point cloud.
@@ -738,6 +835,11 @@ Use the same flow when the tree has settled or been bumped.
     detections.jsonl         append-only per-frame results
     overrides.json           your edits (§11.3)
     frames/<segment>/*.jpg   raw frames
+    walk/<view>/             walk-around capture (§7.9)
+      live.jsonl, live/*.jpg   live frames with phone time and orientation
+      motion.jsonl             orientation samples
+      observations.json        decoded keyframes, reused by later solves
+    videos/<view>.upload     uploaded recordings
   maps/<map>/map.json        immutable versions
   maps/active                pointer to the active version
 ```
@@ -746,7 +848,7 @@ Use the same flow when the tree has settled or been bumped.
   - JSON files are written atomically (temp file, fsync, rename), and logs are append-only.
   - A crash loses at most the frame being written.
 - **Retention.**
-  - Raw frames are kept for the active map's scan and the 2 most recent scans (configurable).
+  - Raw frames, live walk frames and recordings are kept for the active map's scan and the 2 most recent scans (configurable). Decoded walk keyframes and the orientation log are kept.
   - Detections are small and kept forever.
   - A full scan's frames take about 0.3–0.5 GB.
 - **Reproducibility.** Each map records its inputs: the scan, overrides, parameters and software version.
@@ -796,8 +898,9 @@ The web app is phone-first, built with TypeScript, Vite and three.js, and served
 | Page | Purpose |
 |---|---|
 | Setup | Controller discovery and checks, tree height, network and HTTPS help, power limit. |
-| Calibrate | Runs on the tripod phone: camera setup, capture progress, live detection overlay, warnings, coverage guidance, video upload. |
-| Control | Runs on any other browser: start the next view, see progress and "turn the tree by N°" guidance without touching the tripod phone. |
+| Scan | **The default (draft 4).** Walk-around capture: live camera, recording, orientation sensor, coverage ring, warnings, upload, then the map's summary (§7.9). |
+| Calibrate | Advanced, tripod: camera setup, capture progress, live detection overlay, warnings, coverage guidance, video upload. |
+| Control | Advanced, tripod: runs on any other browser; start the next view, see progress and "turn the tree by N°" guidance without touching the tripod phone. |
 | Camera calibration | Optional: the ChArUco board, shown on a monitor, and the capture, done on the phone. |
 | Map | 3D review, quality report, editing, re-scan, versions, activation, export. |
 | Test | Sweep test, status colors, identify LED, brightness. |
@@ -813,6 +916,8 @@ server/treelights/
   wled/              DDP, JSON API client, discovery, monitor, config fingerprint
   output/            lease, output thread, keepalive, renderer, power cap
   capture/           session state machines, protocol, capture plans, codes, verification
+  walk/              walk-around capture: pattern, blobs, timing, tracking, gyro calibration,
+                     decoding, keyframes, live session, processing job
   detection/         detector, binary decoder, registration, sanity checks, video decoding
   reconstruction/    camera model, poses, bundle adjustment, orientation, hypotheses,
                      chain selection, bounds, refinement, surface, filling, quality
@@ -832,7 +937,8 @@ docker/              Dockerfile, docker-compose.yml
 - **WLED:** `GET /api/wled/discover`, `GET /api/wled/checks`, `POST /api/wled/identify {index}`
 - **Output lease:** `POST`/`DELETE /api/output/lease`. The lease is also kept by the WebSocket heartbeat.
 - **Scans:** `POST /api/scans`, `GET /api/scans/{scan}`, `GET /api/scans/{scan}/coverage`, `PUT /api/scans/{scan}/overrides`
-- **Live capture:** `WSS /ws/capture`, the protocol in §7.6. Frames travel as binary messages.
+- **Walk-around capture:** `WSS /ws/walk` (§7.9); then `PUT /api/scans/{scan}/video/{view}/upload?offset=N` (resumable) and `POST /api/scans/{scan}/walk/{view}/process`, which returns a job.
+- **Live capture (tripod):** `WSS /ws/capture`, the protocol in §7.6. Frames travel as binary messages.
 - **Video:** `POST /api/scans/{scan}/sequence/play`, and `POST /api/scans/{scan}/videos` (resumable upload)
 - **Solving:** `POST /api/scans/{scan}/solve` returns a job; `GET /api/jobs/{job}`
 - **Maps:** `GET /api/maps`, `GET /api/maps/{map}`, `POST /api/maps/{map}/activate`, `GET /api/maps/{map}/export?fmt=json|csv`
@@ -861,7 +967,35 @@ docker/              Dockerfile, docker-compose.yml
 - Every true break and connector found.
 - Re-running a solve gives an identical map.
 
-**Unit tests:** DDP encoding, the Hamming code, the detector on recorded frames, chain selection on hand-built chains, bound learning, gap filling, and atomic storage.
+**Walk-around simulator** (`sim/walksim.py`, `sim/virtual_walker.py`). A person carries the phone once around the tree (1.1 loops, so the walk overlaps itself) at a radius that fits the tree in the picture:
+- **The phone:**
+  - camera poses from the walk, with smooth speed changes, hand sway (1.2°), tremor and a walking bob;
+  - a 30 fps recording with frame-time jitter, dropped frames and H.264 compression;
+  - live JPEG frames at about 8 fps, with network drops;
+  - motion blur from the 1/60 s exposure;
+  - the orientation sensor in its own device axes, with an arbitrary heading, drift (2°/min), noise and a 20 ms offset from the frames.
+- **The LEDs:** the pattern as WLED would show it, with 60 ms latency, plus occasional stale frames (3%).
+- **The scene faults** of the tripod tests: branches hiding LEDs and scattering their light, needle glints, a mirror, exposure drift, TV flicker and sensor noise.
+- **"Ideal"** turns every one of these off: a perfectly steady walk, an exact sensor, no blur, drops or scene faults.
+
+The end-to-end test runs the real server against a virtual phone walking in real time. The phone streams live frames over `/ws/walk` while DDP drives a virtual WLED. It then uploads its recording, and the walk is processed and solved. This runs in both configurations.
+
+**Results** (150 LEDs on a 74 cm tree, a 50 s walk; two random trees and walks per configuration; errors are after a similarity alignment to the truth):
+
+| Configuration | LEDs identified (live / video) | Wrong identities | Gyro calibrated | Measured | Median error | Max error | Connectors |
+|---|---|---|---|---|---|---|---|
+| Ideal, tree 1 | 150 / 150 | 0.08% / 0.04% | yes (focal +1.4%) | 150 | 0.03 cm | 0.10 cm | 2 of 2 |
+| Ideal, tree 2 | 149 / 150 | 0 / 0 | yes | 150 | 0.03 cm | 0.18 cm | 2 of 2 |
+| All faults, tree 1 | 138 / 149 | 0.01% / 0.25% | yes | 149 | 0.04 cm | 0.28 cm | 2 of 2 |
+| All faults, tree 2 | 124 / 148 | 0.37% / 0.01% | yes | 147 | 0.05 cm | 0.69 cm | 2 of 2 |
+| Live frames only, ideal | 150 | 0.08% | yes | 150 | 0.03 cm | 0.17 cm | 2 of 2 |
+| Live frames only, all faults (tree 2) | 124 | 0.37% | yes | 122 (+26 estimated) | 0.23 cm | 15.7 cm (1 LED) | 2 of 2 |
+
+- **"Wrong identities"** counts detections given an LED whose true image position is more than 45 px away. Light an LED scatters onto branches nearby is counted separately and correctly carries that LED's identity. Most of the remaining "wrong" detections are that same scattered light, landing further away.
+- **The decoding thresholds** were chosen on tree 1's walks. Tree 2 and the end-to-end walks were not used to choose them.
+- **Live frames alone** are as good as both sources without noise. With every fault they measure fewer LEDs, and one LED was placed 15.7 cm off. The recording is therefore the main source, and the phone retries an interrupted upload before falling back.
+
+**Unit tests:** DDP encoding, the Hamming code, the walk pattern and its decoder (wrong answers never accepted under bit errors and track swaps), timing sync with drift, gyro conventions, tracking with and without the gyro, the detector on recorded frames, chain selection on hand-built chains, bound learning, gap filling, and atomic storage.
 
 **On your tree:** setup checks → one view → full scan → sweep test.
 
@@ -881,7 +1015,8 @@ docker/              Dockerfile, docker-compose.yml
 9. **Sweep test animation** and the power cap.
 10. **Recorded-video mode** and the optional camera calibration.
 11. **Validation on your tree.**
+12. **Walk-around capture (draft 4):** pattern, timing, tracking, gyro self-calibration, decoding, live session and feedback, recording upload and fusion, the Scan page, and the walk simulator (§7.9, §17).
 
 ## 19. Open questions
 
-None. Draft 3 records the answers to draft 2's questions (§1).
+None. Draft 3 records the answers to draft 2's questions (§1), and draft 4 the change to walking around the tree.

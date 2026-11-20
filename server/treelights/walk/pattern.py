@@ -140,3 +140,63 @@ def decode_bits(votes: dict[int, list[tuple[bool, float]]], n_leds: int, min_agr
     if idx >= n_leds:
         return None, {"reason": "out_of_range"}
     return int(idx), {"weakest": weakest, "erased": len(erased)}
+
+
+_PM_CACHE: dict[int, np.ndarray] = {}
+
+# Soft decoding is accepted only for votes from two or more consecutive pattern cycles
+# that agree with each other (decode.py merges cycles only while they do). Measured on
+# simulated walks (ideal, and with every fault; video and live frames): pieces from a
+# single cycle produced every wrongly identified piece that passed the soft thresholds,
+# while with two or more cycles no wrong piece reached these thresholds. A single cycle
+# must decode with hard decisions.
+MIN_BITS = 14  # bits with votes needed to decode
+MIN_AGREEMENT = 0.7  # weighted score of the best codeword / total vote weight
+MIN_MARGIN = 0.25  # (best - second best) / total vote weight
+MIN_SOFT_CYCLES = 2
+
+
+def decode_soft(votes: dict[int, list[tuple[bool, float]]], n_leds: int, min_bits: int = MIN_BITS,
+                min_agreement: float = MIN_AGREEMENT, min_margin: float = MIN_MARGIN) -> tuple[int | None, dict]:
+    """Soft-decision (maximum likelihood) decoding over the LEDs' codewords.
+
+    Each bit's votes are summed with their strengths (+ for 1, - for 0); every LED's
+    codeword is scored against that, and the best one is accepted only if it agrees
+    clearly with the votes and beats the runner-up by a clear margin. Codewords differ
+    in at least 4 bits, so a few weak or noisy bits (an LED partly hidden, another
+    LED's glow in the aperture, motion blur) don't make a wrong LED win; bits without
+    votes simply don't count."""
+    v = np.zeros(N_BITS)
+    for b, vs in votes.items():
+        v[b] = sum(s if val else -s for val, s in vs)
+    observed = int((np.abs(v) > 0).sum())
+    total = float(np.abs(v).sum())
+    if observed < min_bits or total <= 0:
+        return None, {"reason": "too_few_bits", "bits": observed}
+    pm = _PM_CACHE.get(n_leds)
+    if pm is None:
+        pm = binary.code_table(n_leds).astype(float) * 2 - 1
+        _PM_CACHE[n_leds] = pm
+    scores = pm @ v
+    order = np.argsort(-scores)
+    best, second = float(scores[order[0]]), float(scores[order[1]]) if len(order) > 1 else -total
+    agreement = best / total
+    margin = (best - second) / total
+    if agreement < min_agreement or margin < min_margin:
+        return None, {"reason": "ambiguous", "agreement": agreement, "margin": margin}
+    return int(order[0]), {"weakest": agreement, "margin": margin, "erased": N_BITS - observed}
+
+
+def decode_votes(votes: dict[int, list[tuple[bool, float]]], n_leds: int, n_cycles: int = 1) -> tuple[int | None, dict]:
+    """Hard decoding (every bit reliable, valid codeword) or, for votes from at least
+    MIN_SOFT_CYCLES consistent cycles, soft decoding. If both give an answer and they
+    differ, nothing is accepted."""
+    h, hinfo = decode_bits(votes, n_leds)
+    s, sinfo = decode_soft(votes, n_leds) if n_cycles >= MIN_SOFT_CYCLES else (None, {"reason": "single_cycle"})
+    if h is not None and s is not None and h != s:
+        return None, {"reason": "hard_soft_disagree"}
+    if h is not None:
+        return h, {**hinfo, "how": "hard"}
+    if s is not None:
+        return s, {**sinfo, "how": "soft"}
+    return None, sinfo

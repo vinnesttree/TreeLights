@@ -2,9 +2,10 @@
 
 Per source (the frames streamed live during the walk, and the phone's recording):
   timing sync -> tracking without gyro -> gyro self-calibration -> tracking with
-  gyro -> decoding LED identities from tracks.
-Then keyframes are chosen across both sources (the video is denser; the live frames
-also work alone) and turned into segments for the existing solver, with the gyro's
+  gyro -> decoding LED identities from tracks (the tracking that identifies more
+  detections is kept).
+Then keyframes are chosen across both sources (the video wherever it covers a time
+window; the live frames fill gaps and also work alone) and turned into segments for the existing solver, with the gyro's
 gravity direction ("up") and focal length as priors.
 
 Times: live frames carry the phone's clock (seconds); the video carries its own
@@ -48,6 +49,7 @@ class SourceResult:
     ids: dict[int, list[Identity]]
     gyro: gyromod.GyroModel | None
     notes: list[str] = field(default_factory=list)
+    gyro_cal: dict = field(default_factory=dict)  # calibration diagnostics, also when rejected
 
     @property
     def frame_t(self) -> np.ndarray:
@@ -79,6 +81,7 @@ def process_source(src: Source, n_leds: int, log_t: np.ndarray | None, log_q: np
     if not timing.ok:
         notes.append(f"{src.name}: the LED pattern wasn't found in the frames.")
     ts = track(frames, None, use_gyro=False)
+    tracking = "image"
     model = gyro_model
     have_log = log_t is not None and log_q is not None and len(log_t) >= 10 and src.phone_t is not None
     if have_log and model is None:
@@ -93,9 +96,27 @@ def process_source(src: Source, n_leds: int, log_t: np.ndarray | None, log_q: np
             fr.meta["q"] = qq
         f_px = model.f * scale
         K = np.array([[f_px, 0, (src.width - 1) / 2], [0, f_px, (src.height - 1) / 2], [0, 0, 1.0]])
-        ts = track(frames, K, use_gyro=True)
-    ids = decode_tracks(ts, t, timing, n_leds)
-    return SourceResult(src, timing, ts, ids, model if (model and model.ok) else None, notes)
+        ts_g = track(frames, K, use_gyro=True)
+        ids_g = decode_tracks(ts_g, t, timing, n_leds)
+        ids = decode_tracks(ts, t, timing, n_leds)
+        # The gyro's prediction helps most with hand jitter at full frame rate; with
+        # frames far apart (the live stream) the walk's own motion dominates and it
+        # can do worse. Keep whichever tracking identifies more detections.
+        if _identified_rows(ts_g, ids_g, timing, t) >= _identified_rows(ts, ids, timing, t):
+            ts, ids = ts_g, ids_g
+            tracking = "gyro"
+    else:
+        ids = decode_tracks(ts, t, timing, n_leds)
+    cal = {} if model is None else dict(model.info, ok=model.ok, f=round(model.f, 1), delta=round(model.delta, 3))
+    cal["tracking"] = tracking
+    return SourceResult(src, timing, ts, ids, model if (model and model.ok) else None, notes, cal)
+
+
+def _identified_rows(ts: TrackSet, ids: dict, timing: Timing, frame_t: np.ndarray) -> int:
+    if not ids or len(ts.rows) == 0:
+        return 0
+    ptm = timing.pattern_time(frame_t[ts.rows[:, 1].astype(int)])
+    return sum(1 for r, p in zip(ts.rows, ptm) if int(r[0]) in ids and identity_at(ids[int(r[0])], float(p)) is not None)
 
 
 def video_phone_times(video_t: np.ndarray, video_timing: Timing, live: SourceResult | None, rec_start: float | None) -> np.ndarray:
@@ -142,6 +163,10 @@ def _rate(frames: list[Frame], i: int) -> float:
     return float(ang / max(abs(frames[j].t - frames[i].t), 1e-3))
 
 
+def _priority(source: str) -> int:
+    return 1 if source == "video" else 0
+
+
 def build_observations(results: list[SourceResult]) -> tuple[dict, dict, dict]:
     """Choose keyframes across sources; return (obs, segments, info) for the solver."""
     cands: list[tuple[float, float, str, int]] = []  # (phone time, score, source name, frame index)
@@ -165,10 +190,15 @@ def build_observations(results: list[SourceResult]) -> tuple[dict, dict, dict]:
     cands.sort()
     t0, t1 = cands[0][0], cands[-1][0]
     win = max(MIN_KEYFRAME_GAP_S, (t1 - t0) / MAX_KEYFRAMES)
+    # One keyframe per time window. The recording wins wherever it covers the window
+    # (full frame rate and resolution, and one camera for the solver to calibrate);
+    # live frames fill windows it doesn't cover, or stand alone if it wasn't uploaded.
     chosen: dict[int, tuple] = {}
     for c in cands:
         w = int((c[0] - t0) // win)
-        if w not in chosen or c[1] > chosen[w][1]:
+        cur = chosen.get(w)
+        better = cur is None or (_priority(c[2]), c[1]) > (_priority(cur[2]), cur[1])
+        if better:
             chosen[w] = c
     obs: dict[str, dict[int, list[dict]]] = {}
     segs: dict[str, dict] = {}

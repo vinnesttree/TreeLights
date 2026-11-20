@@ -27,6 +27,9 @@ from .maps import guidance as guide
 from .maps.store import ActivationBlocked, MapStore, export_csv
 from .output.manager import OutputManager, PowerLimiter
 from .reconstruction.job import run_solve
+from .walk import protocol as walkproto
+from .walk.job import process_walk
+from .walk.session import WalkSession
 from .wled import discovery
 from .wled.client import config_fingerprint
 from .wled.ddp import UdpFrameSender
@@ -70,6 +73,7 @@ class AppState:
         self.maps = MapStore(self.data_dir)
         self.profiles = camcal.ProfileStore(self.data_dir)
         self.session: CaptureSession | None = None
+        self.walk: WalkSession | None = None
         self.jobs: dict[str, Job] = {}
         self.guidance: dict | None = None
         self.control_clients: set[asyncio.Queue] = set()
@@ -117,6 +121,63 @@ class AppState:
         self.session = sess
         self.guidance = None
         return sess
+
+    def open_walk(self, scan_id: str | None = None) -> WalkSession:
+        """A walk-around capture (§7.9), in the given scan or a new one."""
+        if self.session and self.session.busy():
+            raise HTTPException(409, "A view is being captured; stop it first.")
+        if self.walk and self.walk.state == "walking":
+            raise HTTPException(409, "A walk is already in progress.")
+        s = self.config.settings
+        if scan_id:
+            scan = self.scans.get(scan_id)
+        else:
+            active = self.maps.active()
+            self.scans.prune_frames({active["scan"]} if active else set(), s.raw_frame_retention_scans)
+            breaks = self.link.cfg.output_breaks() if self.link.cfg else []
+            scan = self.scans.create(s.wled.led_count, {
+                "output_breaks": breaks,
+                "wled": {"mac": self.link.mac, "led_count": s.wled.led_count, "config_hash": self.fingerprint()},
+                "settings": s.capture.model_dump(),
+            })
+        level = 48
+        if self.session and self.session.scan.id == scan.id and getattr(self.session, "cal", None) is not None:
+            lv = [int(v) for v in self.session.cal.levels if v]
+            level = int(np.median(lv)) if lv else level
+        self.walk = WalkSession(scan, self.output, level=level)
+        return self.walk
+
+    def start_walk_processing(self, scan_id: str, vid: str, video_path: str | None) -> Job:
+        scan = self.scans.get(scan_id)
+        try:
+            view = scan.view(vid)
+        except StopIteration:
+            raise HTTPException(404, "no such view")
+        if view.get("mode") != "walk":
+            raise HTTPException(400, "not a walk-around view")
+        if self.walk and self.walk.scan.id == scan_id and self.walk.vid == vid and self.walk.state == "walking":
+            raise HTTPException(409, "The walk is still in progress.")
+        job = Job("walk", scan_id)
+        self.jobs[job.id] = job
+        s = self.config.settings
+        prev = self.maps.active()
+        wled = {"mac": self.link.mac, "led_count": s.wled.led_count, "config_hash": self.fingerprint()}
+        scan.set_view(vid, status="processing")
+
+        async def run() -> None:
+            try:
+                m = await asyncio.get_running_loop().run_in_executor(
+                    self.executor, process_walk, str(scan.root), vid, s.tree_height_cm, prev, wled, None, video_path)
+                job.result = {"map": self.maps.save(m), "quality": m["quality"]}
+                job.status = "done"
+            except Exception as e:  # noqa: BLE001
+                log.exception("walk processing failed")
+                job.status, job.error = "failed", str(e)
+                scan.set_view(vid, status="failed", error=str(e))
+            job.finished = time.time()
+
+        asyncio.ensure_future(run())
+        return job
 
     def fingerprint(self) -> str | None:
         return config_fingerprint(self.link.info, self.link.cfg) if self.link.info else None
@@ -224,6 +285,8 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
     async def _shutdown() -> None:
         if state.session:
             await state.session.stop()
+        if state.walk:
+            await state.walk.stop("server shutdown")
         await state.monitor.stop()
         await state.link.close()
         state.output.stop()
@@ -507,6 +570,17 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
         asyncio.ensure_future(run())
         return job.to_dict()
 
+    # ---- walk-around capture (§7.9) -----------------------------------------------------------
+    @app.post("/api/scans/{sid}/walk/{vid}/process")
+    async def walk_process(sid: str, vid: str, body: dict = Body(default={})) -> dict:
+        """Decode the walk's live frames and uploaded recording (if any), then solve."""
+        try:
+            p = _video_path(sid, vid)
+        except FileNotFoundError:
+            raise HTTPException(404, "no such scan")
+        use_video = body.get("video", True) and p.exists() and p.stat().st_size > 0
+        return state.start_walk_processing(sid, vid, str(p) if use_video else None).to_dict()
+
     # ---- maps -----------------------------------------------------------------------------
     @app.get("/api/maps")
     def maps() -> list[dict]:
@@ -599,6 +673,89 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
             unsub()
             if state.session is sess:
                 sess.camera_disconnected("websocket closed")
+
+    @app.websocket("/ws/walk")
+    async def ws_walk(ws: WebSocket) -> None:
+        """The phone during a walk-around capture (protocol: walk/protocol.py)."""
+        if not ws_allowed(ws):
+            await ws.close(code=4401)
+            return
+        await ws.accept()
+        lock = asyncio.Lock()
+
+        async def send(msg: dict) -> None:
+            async with lock:
+                await ws.send_json(msg)
+
+        try:
+            hello = await ws.receive_json()
+        except (WebSocketDisconnect, ValueError):
+            return
+        walk = state.walk
+        resume = walk is not None and walk.state == "walking" and hello.get("view") == walk.vid
+        try:
+            if not resume:
+                walk = state.open_walk(hello.get("scan"))
+        except (HTTPException, FileNotFoundError) as e:
+            await send({"type": "error", "message": getattr(e, "detail", None) or "no such scan"})
+            await ws.close()
+            return
+        walk.send = send
+        walk.disconnected_at = None
+        camera = hello.get("camera") or {}
+        await send({"type": "welcome", "scan": walk.scan.id, "view": walk.vid, "n": walk.n, **walkproto.timing_info(),
+                    "resumed": resume})
+        try:
+            while True:
+                msg = await ws.receive()
+                if msg["type"] == "websocket.disconnect":
+                    break
+                if msg.get("bytes") is not None:
+                    try:
+                        header, jpeg = walkproto.unpack_frame(msg["bytes"])
+                        walk.on_frame(header, jpeg)
+                    except (ValueError, KeyError):
+                        pass
+                    continue
+                if msg.get("text") is None:
+                    continue
+                try:
+                    cmd = json.loads(msg["text"])
+                except ValueError:
+                    continue
+                t = cmd.get("type")
+                try:
+                    if t == "start":
+                        vid = walk.start(cmd.get("camera") or camera)
+                        await send({"type": "started", "scan": walk.scan.id, "view": vid})
+                    elif t == "motion":
+                        walk.on_motion(cmd.get("t") or [], cmd.get("q") or [])
+                    elif t == "rec_start":
+                        walk.on_rec_start(float(cmd["t"]))
+                    elif t == "stop":
+                        await walk.stop(cmd.get("reason", "stopped"))
+                        await send({"type": "stopped", "scan": walk.scan.id, "view": walk.vid,
+                                    "upload": f"/api/scans/{walk.scan.id}/video/{walk.vid}/upload",
+                                    "process": f"/api/scans/{walk.scan.id}/walk/{walk.vid}/process"})
+                    elif t == "ping":
+                        await send({"type": "pong", "t": cmd.get("t")})
+                except (RuntimeError, HTTPException, KeyError, ValueError) as e:
+                    await send({"type": "error", "message": getattr(e, "detail", None) or str(e)})
+        except WebSocketDisconnect:
+            pass
+        finally:
+            if walk.send is send:
+                walk.send = None
+                if walk.state == "walking":
+                    # A Wi-Fi blip shouldn't end the walk: the phone reconnects with the view id.
+                    walk.disconnected_at = time.monotonic()
+
+                    async def grace(w=walk) -> None:
+                        await asyncio.sleep(walkproto.RECONNECT_GRACE_S)
+                        if w.send is None and w.state == "walking":
+                            await w.stop("phone disconnected")
+
+                    asyncio.ensure_future(grace())
 
     @app.websocket("/ws/control")
     async def ws_control(ws: WebSocket) -> None:

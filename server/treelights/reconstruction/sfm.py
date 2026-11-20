@@ -7,6 +7,7 @@ observations (one clear candidate) are used to estimate the cameras.
 
 from __future__ import annotations
 
+import copy
 import itertools
 import logging
 from dataclasses import dataclass, field
@@ -165,8 +166,9 @@ def _triangulate_new(segs: dict[str, SegmentObs], cams: Cameras) -> None:
 
 
 def bundle_adjust(segs: dict[str, SegmentObs], cams: Cameras, fixed: str, scale_ref: str | None,
-                  max_nfev: int = 100, loss: str = "cauchy") -> None:
-    """Robust sparse BA over poses, per-segment focal deviation, shared f0/k1/k2 and points."""
+                  max_nfev: int = 100, loss: str = "cauchy", fix_f0: bool = False) -> None:
+    """Robust sparse BA over poses, per-segment focal deviation, shared f0/k1/k2 and points.
+    fix_f0 holds the shared focal length at its current value."""
     sids = [s for s in cams.poses]
     free = [s for s in sids if s != fixed]
     leds = sorted(cams.points)
@@ -215,9 +217,11 @@ def bundle_adjust(segs: dict[str, SegmentObs], cams: Cameras, fixed: str, scale_
         t[is_free] = poses[free_idx[is_free], 3:]
         return R, t, x[o_pts:].reshape(npts, 3)
 
+    logf0 = float(np.log(cams.f0))
+
     def residuals(x: np.ndarray) -> np.ndarray:
         R, t, P = unpack(x)
-        f = np.exp(x[0] + x[o_fd + obs_s]) * size[obs_s]
+        f = np.exp((logf0 if fix_f0 else x[0]) + x[o_fd + obs_s]) * size[obs_s]
         uv, z = project_points(P[obs_p], R[obs_s], t[obs_s], f, cx[obs_s], cy[obs_s], x[1], x[2])
         r = (uv - obs_uv).ravel()
         prior = x[o_fd : o_fd + nseg] / FOCAL_PRIOR
@@ -232,7 +236,7 @@ def bundle_adjust(segs: dict[str, SegmentObs], cams: Cameras, fixed: str, scale_
     n_extra = nseg + 1 + (1 if scale0 else 0)
     A = lil_matrix((m + n_extra, len(x0)), dtype=int)
     rows = np.arange(len(obs_uv))
-    for c in range(3):
+    for c in range(1 if fix_f0 else 0, 3):
         A[:m, c] = 1
     for k in range(2):
         A[2 * rows + k, o_fd + obs_s] = 1
@@ -251,7 +255,8 @@ def bundle_adjust(segs: dict[str, SegmentObs], cams: Cameras, fixed: str, scale_
                         max_nfev=max_nfev, method="trf", tr_solver="lsmr")
     x = sol.x
     R, t, P = unpack(x)
-    cams.f0, cams.k1, cams.k2 = float(np.exp(x[0])), float(x[1]), float(x[2])
+    cams.f0 = float(np.exp(logf0 if fix_f0 else x[0]))
+    cams.k1, cams.k2 = float(x[1]), float(x[2])
     for s in sids:
         cams.fdev[s] = float(x[o_fd + si[s]])
         cams.poses[s] = (R[si[s]], t[si[s]])
@@ -269,7 +274,7 @@ def bundle_adjust(segs: dict[str, SegmentObs], cams: Cameras, fixed: str, scale_
         cams.points.pop(l, None)
 
 
-def _incremental(segs: dict[str, SegmentObs], a: str, b: str, init, f0: float) -> Cameras:
+def _incremental(segs: dict[str, SegmentObs], a: str, b: str, init, f0: float, fix_f0: bool = False) -> Cameras:
     R, t, pts, _ang = init
     cams = Cameras(f0, 0.0, 0.0)
     cams.poses[a] = (np.eye(3), np.zeros(3))
@@ -278,7 +283,7 @@ def _incremental(segs: dict[str, SegmentObs], a: str, b: str, init, f0: float) -
         cams.fdev[s] = 0.0
         cams.sizes[s] = (segs[s].width, segs[s].height)
     cams.points = dict(pts)
-    bundle_adjust(segs, cams, a, b, max_nfev=15)
+    bundle_adjust(segs, cams, a, b, max_nfev=15, fix_f0=fix_f0)
     remaining = [s for s in segs if s not in cams.poses]
     while remaining:
         remaining.sort(key=lambda s: -sum(1 for i in segs[s].leds if i in cams.points))
@@ -287,19 +292,30 @@ def _incremental(segs: dict[str, SegmentObs], a: str, b: str, init, f0: float) -
             if _register(segs[s], cams):
                 remaining.remove(s)
                 _triangulate_new(segs, cams)
-                bundle_adjust(segs, cams, a, b, max_nfev=10)
+                bundle_adjust(segs, cams, a, b, max_nfev=10, fix_f0=fix_f0)
                 added = True
                 break
         if not added:
             break
     _triangulate_new(segs, cams)
-    bundle_adjust(segs, cams, a, b, max_nfev=25)
+    bundle_adjust(segs, cams, a, b, max_nfev=25, fix_f0=fix_f0)
     cams.seed = (a, b)
     return cams
 
 
+GOOD_RMS_PX = 0.8  # a start that registers every segment this well needs no second seed pair
+FREE_F0_MAX_CHANGE = 0.08  # a measured focal length may be refined by at most this (log)
+
+
 def solve_cameras(segs: dict[str, SegmentObs], f0_prior: float | None = None) -> Cameras | None:
-    """Multi-start: focal guesses x top seed pairs; keep the best solution (§9.3)."""
+    """Multi-start: focal guesses x top seed pairs; keep the best solution (§9.3).
+
+    A focal-length prior is a measurement (a lens calibration, or the walk's gyro
+    calibration). Cameras are then added with the focal length held at it: when every
+    view sees the tree from about the same distance (walking around it), focal length
+    and depth trade off, and a free focal length drifts while cameras are added. At the
+    end it is freed once, and the refinement is kept only if it stays close and fits
+    better."""
     starts = [f0_prior] if f0_prior else [0.5 / np.tan(np.radians(fov) / 2) for fov in FOV_STARTS]
     best: Cameras | None = None
     ids = list(segs)
@@ -316,17 +332,22 @@ def solve_cameras(segs: dict[str, SegmentObs], f0_prior: float | None = None) ->
         cand.sort(key=lambda c: -c[0])
         for _score, a, b, init in cand[:2]:
             try:
-                cams = _incremental(segs, a, b, init, f0)
+                cams = _incremental(segs, a, b, init, f0, fix_f0=bool(f0_prior))
             except (np.linalg.LinAlgError, ValueError, cv2.error) as e:
                 log.debug("start failed: %s", e)
                 continue
             key = (-len(cams.poses), cams.cost)
             if best is None or key < (-len(best.poses), best.cost):
                 best = cams
-            if len(cams.poses) == len(segs):
-                break  # the next seed pair only matters if this one left segments out
+            if len(cams.poses) == len(segs) and cams.rms_px < GOOD_RMS_PX:
+                break  # the next seed pair only matters if this one left segments out or fits poorly
     if best is not None:
         a, b = best.seed
         _triangulate_new(segs, best)
-        bundle_adjust(segs, best, a, b, max_nfev=300)
+        bundle_adjust(segs, best, a, b, max_nfev=300, fix_f0=bool(f0_prior))
+        if f0_prior:
+            free = copy.deepcopy(best)
+            bundle_adjust(segs, free, a, b, max_nfev=300)
+            if abs(np.log(free.f0 / f0_prior)) < FREE_F0_MAX_CHANGE and free.cost <= best.cost:
+                best = free
     return best

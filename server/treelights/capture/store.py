@@ -7,6 +7,8 @@ scans/<scan>/
   overrides.json     user edits
   refs/<seg>.npy     dark reference images
   frames/<seg>/...   raw frames
+  walk/<view>/...    walk-around captures: live frames, motion log, decoded keyframes
+  videos/<view>.upload  uploaded recordings
 """
 
 from __future__ import annotations
@@ -164,6 +166,22 @@ class Scan:
                     o[led] = _consistent(binary_found) if binary_found else []
         return out
 
+    def walk_observations(self) -> dict:
+        """Keyframe observations of processed walk-around views (walk/<view>/observations.json)."""
+        out: dict = {"obs": {}, "segments": {}, "info": {}, "notes": [], "focal_prior": None}
+        for v in self.meta["views"]:
+            if v.get("mode") != "walk":
+                continue
+            d = storage.read_json(self.root / "walk" / v["id"] / "observations.json", default=None)
+            if not d:
+                continue
+            out["obs"].update({s: {int(led): c for led, c in o.items()} for s, o in d["obs"].items()})
+            out["segments"].update(d["segments"])
+            out["info"][v["id"]] = d.get("info", {})
+            out["notes"] += d.get("notes", [])
+            out["focal_prior"] = out["focal_prior"] or d.get("focal_prior")
+        return out
+
     def overrides(self) -> dict:
         return storage.read_json(self.root / "overrides.json", default={}) or {}
 
@@ -203,8 +221,11 @@ class ScanStore:
         for k, p in enumerate(scans):
             if k < keep_recent or p.name in keep_ids:
                 continue
-            if (p / "frames").exists():
-                storage.remove_tree(p / "frames")
+            raw = [p / "frames", p / "videos"] + [w / "live" for w in (p / "walk").glob("*") if w.is_dir()]
+            raw = [r for r in raw if r.exists()]
+            for r in raw:  # walk keyframe observations and the motion log are kept
+                storage.remove_tree(r)
+            if raw:
                 pruned.append(p.name)
         return pruned
 
