@@ -147,12 +147,13 @@ def solve(inp: SolveInput, progress=lambda msg: None) -> dict:
         for h in lst:
             h.cost = hyp.hypothesis_cost(h, prior)
     H_world = float(np.ptp(reliable[:, 1])) or 1.0
-    s0 = (inp.tree_height_cm / H_world) if inp.tree_height_cm else None  # cm per world unit (preliminary)
+    # Map units per world unit (preliminary): cm with a tree height, else tree heights.
+    # Link bounds and the cap you set on the Map page are in map units.
+    s0 = (inp.tree_height_cm / H_world) if inp.tree_height_cm else 1.0 / H_world
     user = {"breaks": inp.overrides.get("breaks", [])}
-    if s0:
-        user["links"] = {int(k): float(v) / s0 for k, v in (inp.overrides.get("links") or {}).items()}
-        if inp.overrides.get("cap"):
-            user["cap"] = float(inp.overrides["cap"]) / s0
+    user["links"] = {int(k): float(v) / s0 for k, v in (inp.overrides.get("links") or {}).items() if float(v) > 0}
+    if inp.overrides.get("cap"):
+        user["cap"] = float(inp.overrides["cap"]) / s0
 
     # ---- chain selection with dynamic bounds (§9.6, §10) -------------------------
     def strong(h: hyp.Hypothesis, tier: int) -> bool:
@@ -339,6 +340,9 @@ def solve(inp: SolveInput, progress=lambda msg: None) -> dict:
             "long_links": [{"from": i, "bound": round(float(bounds.bound[i] * scale), 3), "kind": bounds.kind[i]}
                            for i in range(n - 1) if bounds.kind[i] in ("long", "long_predicted", "user")],
             "breaks": breaks,
+            # Every link's bound (map units; null = break), for review and editing.
+            "link_bounds": [round(float(b * scale), 3) if np.isfinite(b) else None for b in bounds.bound],
+            "cap": inp.overrides.get("cap"),
         },
         "surface": {"h": np.round((surface[0] - ymin) * scale, 3).tolist(), "r": np.round(surface[1] * scale, 3).tolist()},
         "cameras": cams_out,

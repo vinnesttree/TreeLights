@@ -12,6 +12,7 @@ export function mapPage(): Page {
       const sel = h("div", { class: "muted small" }, "Tap an LED to select it.");
       const editsBox = h("div", { class: "small" });
       const rescanBox = h("div");
+      const limitsBox = h("div");
       let map: TreeMap | null = null;
       let overrides: any = {};
       let selected: number | null = null;
@@ -48,6 +49,7 @@ export function mapPage(): Page {
         viewer!.setMap(map);
         renderReport();
         renderEdits();
+        renderLimits();
         renderRescan();
         selectLed(null);
       }
@@ -93,7 +95,77 @@ export function mapPage(): Page {
             h("button", { onclick: () => toggleList("breaks", i, `Break after LED ${i}.`) }, (overrides.breaks ?? []).includes(i) ? `Remove break after ${i}` : `Break after ${i}`),
             l.p ? h("button", { onclick: () => viewer?.startDrag(i) }, "Move") : "",
           ),
+          i + 1 < map.leds.length ? linkEditor(i) : "",
         );
+      }
+
+      /** The link from LED i to i+1: its measured length, current bound, and your own bound. */
+      function linkEditor(i: number): HTMLElement {
+        const m = map!;
+        const a = m.leds[i].p, b = m.leds[i + 1].p;
+        const len = a && b ? Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) : null;
+        const isBreak = m.chain.breaks.some((x) => x.from === i);
+        const long = m.chain.long_links.find((x) => x.from === i);
+        const bound = m.chain.link_bounds ? m.chain.link_bounds[i] : (long ? long.bound : m.chain.base_link);
+        const kind = isBreak ? "break (no limit)" : long ? (long.kind === "user" ? "your bound" : long.kind === "long_predicted" ? "connector (predicted)" : "connector") : "normal";
+        const mine: number | undefined = overrides.links?.[String(i)];
+        const input = h("input", { type: "number", min: "0", step: "0.1", placeholder: fmt(bound ?? m.chain.base_link, 1), value: mine ?? "" }) as HTMLInputElement;
+        return h("div", { class: "small", style: { marginTop: "10px" } },
+          h("div", {}, h("b", {}, `Link ${i}→${i + 1}: `),
+            `${len !== null ? fmt(len, 1) + " " + unit() + " long" : "not measured"} · `,
+            `allowed up to ${bound === null || bound === undefined ? "any distance" : fmt(bound, 1) + " " + unit()} (${kind})`),
+          h("div", { class: "row", style: { marginTop: "6px" } },
+            h("span", {}, `Your bound (${unit()})`), input,
+            h("button", { onclick: () => setLinkBound(i, input.value) }, "Set bound"),
+            mine !== undefined ? h("button", { onclick: () => setLinkBound(i, "") }, "Clear bound") : "",
+          ),
+          h("div", { class: "muted" }, "A bound replaces the learned one for this link. Use it for a connector the solver missed, or to stop it bridging a gap it shouldn't."),
+        );
+      }
+
+      async function setLinkBound(i: number, value: string) {
+        const links = { ...(overrides.links ?? {}) };
+        if (value.trim() === "") delete links[String(i)];
+        else {
+          const v = Number(value);
+          if (!(v > 0)) return show("Enter a positive length.", "fail");
+          links[String(i)] = v;
+        }
+        overrides.links = links;
+        await saveOverrides(value.trim() === "" ? `Bound for link ${i}→${i + 1} cleared. Re-solve to apply.` : `Link ${i}→${i + 1} limited to ${value} ${unit()}. Re-solve to apply.`);
+        renderLimits();
+        selectLed(selected);
+      }
+
+      function renderLimits() {
+        if (!map) return;
+        const cap: number | undefined = overrides.cap ?? undefined;
+        const input = h("input", { type: "number", min: "0", step: "0.1", placeholder: "none", value: cap ?? "" }) as HTMLInputElement;
+        const nLinks = Object.keys(overrides.links ?? {}).length;
+        limitsBox.replaceChildren(
+          h("h2", {}, "Link limits"),
+          h("p", { class: "small muted" },
+            `The solver learned a normal spacing of ${fmt(map.chain.base_link, 1)} ${unit()} between neighbouring LEDs (from ${map.chain.trusted_links} trusted links). `,
+            "Connectors between strands get their own, longer bound. To set a bound for one link, tap an LED: its link to the next LED is shown there."),
+          h("label", {}, `Cap: no link longer than (${unit()})`),
+          h("div", { class: "row" }, input,
+            h("button", { onclick: () => setCap(input.value) }, "Set cap"),
+            cap !== undefined ? h("button", { onclick: () => setCap("") }, "Clear cap") : ""),
+          h("p", { class: "small muted" }, "The cap applies to every link except breaks, including connectors, so set it above your longest connector. Leave it empty to rely on the learned bounds."),
+          nLinks ? h("div", { class: "small" }, `${nLinks} link bound(s) of your own: `,
+            ...Object.entries(overrides.links).map(([k, v]) => h("span", { class: "pill", style: { marginRight: "4px" } }, `${k}→${Number(k) + 1}: ${v} ${unit()}`))) : "",
+        );
+      }
+
+      async function setCap(value: string) {
+        if (value.trim() === "") delete overrides.cap;
+        else {
+          const v = Number(value);
+          if (!(v > 0)) return show("Enter a positive length.", "fail");
+          overrides.cap = v;
+        }
+        await saveOverrides(value.trim() === "" ? "Cap cleared. Re-solve to apply." : `No link may be longer than ${value} ${unit()}. Re-solve to apply.`);
+        renderLimits();
       }
 
       async function identify(i: number) {
@@ -123,10 +195,11 @@ export function mapPage(): Page {
       }
 
       function renderEdits() {
-        const n = (overrides.bad?.length ?? 0) + (overrides.breaks?.length ?? 0) + Object.keys(overrides.positions ?? {}).length;
+        const n = (overrides.bad?.length ?? 0) + (overrides.breaks?.length ?? 0) + Object.keys(overrides.positions ?? {}).length
+          + Object.keys(overrides.links ?? {}).length + (overrides.cap ? 1 : 0);
         editsBox.replaceChildren(n ? h("div", {}, `${n} edit(s) saved for this scan: `,
           h("button", { onclick: resolve }, "Re-solve with edits"), " ",
-          h("button", { onclick: async () => { overrides = {}; await saveOverrides("Edits cleared."); } }, "Clear edits")) : "");
+          h("button", { onclick: async () => { overrides = {}; await saveOverrides("Edits cleared."); renderLimits(); } }, "Clear edits")) : "");
       }
 
       async function resolve() {
@@ -270,6 +343,7 @@ export function mapPage(): Page {
         viewerBox,
         h("div", { class: "legend" }, ...Object.entries(STATUS_COLORS).map(([k, c]) => h("span", { style: { "--c": c } as any }, k.replace("_", " ")))),
         h("div", { class: "card", style: { marginTop: "12px" } }, sel, editsBox),
+        h("div", { class: "card" }, limitsBox),
         h("div", { class: "card" }, rescanBox),
         h("div", { class: "card" }, h("h2", {}, "Quality report"), report),
       );

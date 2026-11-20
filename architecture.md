@@ -811,7 +811,10 @@ Every solve writes a new, immutable map version. Nothing changes on the tree unt
   - move it (drag in a plane facing the viewer);
   - lock it;
   - mark or unmark a break;
-  - edit a link's bound.
+  - edit a link's bound: tap an LED, and its link to the next LED shows its measured length, current bound and kind, with a field for your own bound;
+  - set a cap that no link may exceed (breaks excepted), in the "Link limits" card.
+
+  Bounds and the cap are in the map's units: cm with a tree height, tree heights without. A link's own bound replaces the learned one; the cap then limits every bound, including connectors.
 - **Edits are kept** as scan overrides, re-applied by every later solve, so they're never lost.
 
 ### 11.4 WLED fingerprint
@@ -897,7 +900,9 @@ Use the same flow when the tree has settled or been bumped.
   "chain": {
     "base_link": 9.6,
     "long_links": [{ "from": 49, "bound": 21.0 }],
-    "breaks": [{ "from": 299, "reason": "wled_output_boundary" }]
+    "breaks": [{ "from": 299, "reason": "wled_output_boundary" }],
+    "link_bounds": [10.6, 10.6, "…", null, "…"],
+    "cap": null
   },
   "surface": { "h": [0, 10, 20], "r": [62.0, 59.5, 56.0] },
   "cameras": [

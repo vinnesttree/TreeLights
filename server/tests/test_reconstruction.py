@@ -203,3 +203,48 @@ def test_coincident_positions_keep_the_led_that_fits_its_chain():
     # Neighbouring LEDs at their normal spacing are left alone.
     hyps2 = {i: [SimpleNamespace(X=x, n=5)] for i, x in xs.items()}
     assert _drop_coincident(hyps2) == []
+
+
+def test_link_bound_and_cap_from_the_map_page(full):
+    """Map page edits (§10.1, §11.3): a bound for one link and a cap on all links, in map
+    units: cm with a tree height, tree heights without."""
+    from dataclasses import replace
+
+    tree, _sc, inp, m0 = full
+    lb = m0["chain"]["link_bounds"]
+    assert len(lb) == 599 and lb[299] is None  # the output break has no limit
+    conn = m0["chain"]["long_links"][0]["from"]  # a learned connector
+    base = m0["chain"]["base_link"]
+    # cm: bound one normal link, cap everything just above the connectors.
+    cap = round(max(l["bound"] for l in m0["chain"]["long_links"]) * 1.02, 2)
+    assert 1.5 * base < cap
+    m1 = solve(replace(inp, overrides={"links": {"10": 1.5 * base}, "cap": cap}))
+    b1 = m1["chain"]["link_bounds"]
+    assert b1[10] == pytest.approx(1.5 * base, rel=0.02)
+    assert any(l["from"] == 10 and l["kind"] == "user" for l in m1["chain"]["long_links"])
+    assert max(b for b in b1 if b is not None) <= cap * 1.0001 and b1[299] is None  # breaks stay unlimited
+    assert m1["chain"]["cap"] == cap
+    # Without a tree height the map is in tree heights, and so are the edits.
+    m2 = solve(replace(inp, tree_height_cm=None, overrides={"links": {str(conn): 0.3}}))
+    assert m2["units"] == "tree_heights"
+    assert m2["chain"]["link_bounds"][conn] == pytest.approx(0.3, rel=0.05)
+
+
+def test_link_limits_are_validated(tmp_path):
+    import concurrent.futures
+
+    from fastapi.testclient import TestClient
+
+    from treelights.app import AppState, create_app
+
+    state = AppState(tmp_path, executor=concurrent.futures.ThreadPoolExecutor(1))
+    try:
+        sid = state.scans.create(20).id
+        with TestClient(create_app(state)) as c:
+            ok = c.put(f"/api/scans/{sid}/overrides", json={"links": {"3": "12.5"}, "cap": 30}).json()
+            assert ok["links"] == {"3": 12.5} and ok["cap"] == 30.0
+            assert c.put(f"/api/scans/{sid}/overrides", json={"links": {"3": -1}}).status_code == 400
+            assert c.put(f"/api/scans/{sid}/overrides", json={"cap": "x"}).status_code == 400
+            assert c.get(f"/api/scans/{sid}/overrides").json()["cap"] == 30.0  # rejected edits change nothing
+    finally:
+        state.output.stop()

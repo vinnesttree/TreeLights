@@ -516,6 +516,18 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
     def put_overrides(sid: str, body: dict = Body(...)) -> dict:
         allowed = {"bad", "positions", "breaks", "links", "cap", "locked"}
         clean = {k: v for k, v in body.items() if k in allowed}
+        # Link bounds and the cap are lengths in map units (cm, or tree heights): positive numbers.
+        try:
+            links = {str(int(k)): float(v) for k, v in (clean.get("links") or {}).items()}
+            if any(not (v > 0) for v in links.values()):
+                raise ValueError("a link bound must be a positive length")
+            clean["links"] = links
+            if clean.get("cap") is not None:
+                clean["cap"] = float(clean["cap"])
+                if not clean["cap"] > 0:
+                    raise ValueError("the cap must be a positive length")
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid link limits: {e}")
         state.scans.get(sid).set_overrides(clean)
         return clean
 

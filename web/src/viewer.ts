@@ -8,7 +8,12 @@ export type TreeMap = {
   scan: string;
   units: string;
   leds: MapLed[];
-  chain: { base_link: number; long_links: { from: number; bound: number; kind: string }[]; breaks: { from: number; reason: string }[]; period: number | null; trusted_links: number };
+  chain: {
+    base_link: number; long_links: { from: number; bound: number; kind: string }[]; breaks: { from: number; reason: string }[];
+    period: number | null; trusted_links: number;
+    link_bounds?: (number | null)[]; // every link's bound (null = break); maps solved before this field have none
+    cap?: number | null;
+  };
   quality: any;
   surface: { h: number[]; r: number[] };
 };
