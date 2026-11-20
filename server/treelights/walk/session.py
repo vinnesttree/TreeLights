@@ -291,6 +291,7 @@ class LiveCoverage:
         self.identified: set[int] = set()
         self.sectors: list[set[int]] = [set() for _ in range(SECTORS)]
         self.locked_once = False
+        self.timing = None  # the last good pattern timing of the live stream
         self.cal_request: tuple | None = None  # tracks to calibrate the gyro from, set by live_status
 
     def calibrate(self, req: tuple) -> None:
@@ -331,8 +332,10 @@ def live_status(frames: list[Frame], width: int, height: int, n: int, log_t: np.
         return out
     t = np.array([f.t for f in window])
     # Decoding without the gyro: cheap, and the gyro mostly helps the full-rate video.
-    res = process_source(Source("live", window, width, height, t), n, None, None)
+    res = process_source(Source("live", window, width, height, t), n, None, None, timing_hint=cov.timing)
     out["locked"] = bool(res.timing.ok)
+    if res.timing.ok:
+        cov.timing = res.timing
     cov.locked_once |= res.timing.ok
     if not res.timing.ok and elapsed > 3 * CYCLE_T:
         out["warnings"].append("pattern_not_found")

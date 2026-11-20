@@ -16,7 +16,11 @@ import numpy as np
 
 from .pattern import CYCLE_SLOTS, CYCLE_T, T_SLOT, template
 
-WINDOW_S = 4.0
+# Normalisation window (each side): a whole cycle, so a window nearly always holds
+# frames from the short sync slots even when frames are dropped (with +-4 s, a gap
+# over the sync slots left the window's darkest frames dim code frames, and the fit
+# failed).
+WINDOW_S = 7.2
 MAX_DRIFT = 2e-4  # s/s
 EDGE = 0.15  # fraction of a slot at each end that may mix with its neighbour (transition, exposure)
 RAMP = 0.06  # half-width of the modelled transition, as a fraction of a slot (~12 ms: exposure)

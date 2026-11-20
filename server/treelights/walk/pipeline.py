@@ -68,13 +68,15 @@ class SourceResult:
 
 def process_source(src: Source, n_leds: int, log_t: np.ndarray | None, log_q: np.ndarray | None,
                    gyro_model: gyromod.GyroModel | None = None, f_prior: float | None = None,
-                   phone_time_fn=None) -> SourceResult:
+                   phone_time_fn=None, timing_hint: Timing | None = None) -> SourceResult:
     """phone_time_fn(t, timing) -> phone-clock times, for sources (the video) whose frames
     don't carry phone time; called once the source's own pattern timing is known."""
     frames = src.frames
     t = np.array([f.t for f in frames])
     flux = np.array([float(f.blobs[:, FLUX].sum()) if len(f.blobs) else 0.0 for f in frames])
     timing = estimate(t, flux)
+    if not timing.ok and timing_hint is not None and timing_hint.ok:
+        timing = timing_hint  # the pattern's phase doesn't drift: a timing found earlier still holds
     if src.phone_t is None and phone_time_fn is not None:
         src.phone_t = phone_time_fn(t, timing)
     notes = []

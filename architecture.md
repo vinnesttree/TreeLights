@@ -541,7 +541,9 @@ The phone adds its own warning for turning too fast, and draws the coverage ring
 
 **Processing, per source** (`walk/pipeline.py`):
 1. **Blobs:** local maxima of the green channel above the local background. Each gets its flux, peak, sharpness and a saturation flag.
-2. **Timing:** each frame's total blob flux, normalised over a ±4 s window, is matched against the cycle's expected brightness: sync slots 1 and 0, code slots at a fitted level. Near a slot boundary the expected value ramps between the two slots, which models the exposure. A global search over the 7.2 s cycle is followed by a per-cycle refinement and a fit for clock drift, limited to 200 ppm. In simulation the phase comes out within about 4 ms.
+2. **Timing:** each frame's total blob flux, normalised over a ±7.2 s window, is matched against the cycle's expected brightness: sync slots 1 and 0, code slots at a fitted level. Near a slot boundary the expected value ramps between the two slots, which models the exposure. A global search over the 7.2 s cycle is followed by a per-cycle refinement and a fit for clock drift, limited to 200 ppm. In simulation the phase comes out within about 4 ms.
+   - **Why ±7.2 s:** the window must almost always contain frames from the short sync slots. With ±4 s, the live stream's dropped frames sometimes left a window without any, and the timing fit failed.
+   - **Live feedback** keeps the last good timing and reuses it when a window can't be timed on its own; the pattern's phase doesn't drift.
 3. **Tracking, without the gyro:** blobs are associated frame to frame after a voted global shift. Tracks coast through the sync "off" slot and short occlusions. A lost track can be picked up again for up to 2 s.
 4. **Gyro self-calibration** (`walk/gyro.py`):
    - Rotations between frames about 3 s apart (falling back to 2 s, then 1 s) are recovered from the tracked LEDs with essential matrices.
