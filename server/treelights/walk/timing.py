@@ -26,7 +26,21 @@ EDGE = 0.15  # fraction of a slot at each end that may mix with its neighbour (t
 RAMP = 0.06  # half-width of the modelled transition, as a fraction of a slot (~12 ms: exposure)
 
 
+TREND_S = 1.5  # each side: the running median that removes brightness changes from walking closer or further
+
+
 def normalize(t: np.ndarray, flux: np.ndarray) -> np.ndarray:
+    """Total LED brightness -> roughly 0 (all off) .. 1 (all bright).
+
+    First divided by a running median over +-TREND_S: code slots are 32 of the 36, so
+    the median follows the code level, and with it how much brighter the LEDs look as
+    you walk closer or further (simulated walks varying their distance 140-264 cm
+    changed it 20x, faster than the window below can follow). Then scaled by the
+    extremes over +-WINDOW_S, which hold the sync slots."""
+    lo = np.searchsorted(t, t - TREND_S)
+    hi = np.searchsorted(t, t + TREND_S)
+    trend = np.array([np.median(flux[a:b]) for a, b in zip(lo, hi)])
+    flux = flux / np.maximum(trend, 1e-9)
     out = np.zeros_like(flux, dtype=float)
     lo_i = np.searchsorted(t, t - WINDOW_S)
     hi_i = np.searchsorted(t, t + WINDOW_S)

@@ -89,18 +89,64 @@ def fit_circle_xz(P: np.ndarray) -> tuple[np.ndarray, float, float]:
     return np.array([cx, cz]), r, float(np.sqrt(np.mean(res**2)))
 
 
-def tree_axis_xz(camera_centers_y: np.ndarray, points_y: np.ndarray) -> tuple[np.ndarray, str]:
+AXIS_AGREE = 0.08  # walk: camera-circle and outline axes must agree within this share of the tree's radius
+
+
+def tree_axis_xz(camera_centers_y: np.ndarray, points_y: np.ndarray, walk: bool = False) -> tuple[np.ndarray, str]:
     """Horizontal position of the tree axis in a y-up frame.
 
-    With the tree turned in front of a fixed camera, the camera centers (in
-    the tree's frame) lie on a circle around the turning axis.
+    Tripod: the tree is turned in front of a fixed camera, so the camera centers (in
+    the tree's frame) lie on a circle around the turning axis: the most precise
+    estimate. If they don't, the LEDs' outline is used (outline_axis_xz).
+
+    Walking: the path's centre is the tree's axis only if the walk was a centred
+    circle; people walk closer on one side, in ovals, off-centre. The camera circle is
+    used only when it fits well and agrees with the outline; otherwise the outline.
     """
+    outline = outline_axis_xz(points_y)
+    circle = None
     if len(camera_centers_y) >= 3:
         c, r, rms = fit_circle_xz(camera_centers_y)
         spread = np.ptp(np.degrees(np.arctan2(camera_centers_y[:, 2] - c[1], camera_centers_y[:, 0] - c[0])))
         if r > 0 and rms < 0.08 * r and spread > 60:
-            return c, "turning_axis"
-    return np.median(points_y[:, [0, 2]], axis=0), "point_median"
+            circle = c
+    if circle is not None and not walk:
+        return circle, "turning_axis"
+    if circle is not None and walk:
+        P = np.asarray(points_y, float)
+        radius = float(np.percentile(np.hypot(P[:, 0] - outline[0], P[:, 2] - outline[1]), OUTLINE_PCT)) if len(P) else 0.0
+        if radius > 0 and np.hypot(*(circle - outline)) < AXIS_AGREE * radius:
+            return circle, "walk_circle"
+    return outline, "led_outline"
+
+
+OUTLINE_BANDS = 6
+OUTLINE_PCT = 90
+
+
+def outline_axis_xz(points_y: np.ndarray) -> np.ndarray:
+    """The centre that makes the tree's outline tightest: in each height band, the
+    90th-percentile distance of the LEDs from a candidate centre, summed over bands,
+    is minimised. The outline is set by the outermost LEDs all round, so it doesn't
+    lean towards a side that has more LEDs measured (as the median of the LEDs does)."""
+    from scipy.optimize import minimize
+
+    P = np.asarray(points_y, float)
+    c0 = np.median(P[:, [0, 2]], axis=0)
+    if len(P) < 12:
+        return c0
+    edges = np.quantile(P[:, 1], np.linspace(0, 1, OUTLINE_BANDS + 1))
+    bands = [P[(P[:, 1] >= a) & (P[:, 1] <= b)][:, [0, 2]] for a, b in zip(edges[:-1], edges[1:])]
+    bands = [b for b in bands if len(b) >= 4]
+    if not bands:
+        return c0
+
+    def spread(c: np.ndarray) -> float:
+        return float(sum(np.percentile(np.hypot(*(b - c).T), OUTLINE_PCT) for b in bands))
+
+    scale = float(np.median([np.percentile(np.hypot(*(b - c0).T), OUTLINE_PCT) for b in bands])) or 1.0
+    res = minimize(spread, c0, method="Nelder-Mead", options={"xatol": 1e-3 * scale, "fatol": 1e-6 * scale, "maxiter": 400})
+    return np.asarray(res.x, float) if res.success or res.fun < spread(c0) else c0
 
 
 def visibility_side_fraction(centers: dict[str, np.ndarray], seen: dict[str, list[np.ndarray]], axis_xz: np.ndarray) -> float:

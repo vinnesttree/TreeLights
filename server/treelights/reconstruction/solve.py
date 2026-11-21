@@ -114,7 +114,8 @@ def solve(inp: SolveInput, progress=lambda msg: None) -> dict:
     up, up_report = orient.up_consensus(cand)
     R_up = orient.rotation_to_y(up)
     centers_y = np.array([R_up @ cams.center(s) for s in cams.poses])
-    axis_xz, axis_src = orient.tree_axis_xz(centers_y, pts @ R_up.T)
+    walk = any(str(inp.segments.get(s, {}).get("device", "")).startswith("walk") for s in cams.poses)
+    axis_xz, axis_src = orient.tree_axis_xz(centers_y, pts @ R_up.T, walk=walk)
     y0 = float((pts @ R_up.T)[:, 1].min())
     origin = np.array([axis_xz[0], y0, axis_xz[1]])
 

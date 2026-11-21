@@ -546,6 +546,7 @@ The phone adds its own warning for turning too fast, and draws the coverage ring
 2. **Timing:** each frame's total blob flux, normalised over a ±7.2 s window, is matched against the cycle's expected brightness: sync slots 1 and 0, code slots at a fitted level. Near a slot boundary the expected value ramps between the two slots, which models the exposure. A global search over the 7.2 s cycle is followed by a per-cycle refinement and a fit for clock drift, limited to 200 ppm. In simulation the phase comes out within about 4 ms.
    - **Why ±7.2 s:** the window must almost always contain frames from the short sync slots. With ±4 s, the live stream's dropped frames sometimes left a window without any, and the timing fit failed.
    - **Live feedback** keeps the last good timing and reuses it when a window can't be timed on its own; the pattern's phase doesn't drift.
+   - **Detrending:** before that, brightness is divided by a running median over ±1.5 s. Code slots are 32 of the 36, so the median follows the code level, and with it how much brighter the LEDs look as you walk closer or further. Simulated walks whose distance varied from 140 to 264 cm changed it 20×; without detrending their timing fit sat at the acceptance limit, or failed.
 3. **Tracking, without the gyro:** blobs are associated frame to frame after a voted global shift. Tracks coast through the sync "off" slot and short occlusions. A lost track can be picked up again for up to 2 s.
 4. **Gyro self-calibration** (`walk/gyro.py`):
    - Rotations between frames about 3 s apart (falling back to 2 s, then 1 s) are recovered from the tracked LEDs with essential matrices.
@@ -566,6 +567,14 @@ The phone adds its own warning for turning too fast, and draws the coverage ring
 - **Keyframes.** Up to 48 keyframes are chosen across both sources, one per time window. Each is scored by the number of LEDs identified, their sharpness and the turning rate.
 - **Solving.** Each keyframe becomes a segment for the existing solver (§9): its own camera, the gyro's "up" in that camera, and a focal-length prior from the gyro calibration. From there the solve is the same as for tripod views: robust bundle adjustment, hypotheses, chain selection with dynamic bounds, filling.
 - **Re-solving.** Keyframe observations are stored with the scan (§13), so a re-solve after editing overrides doesn't decode again.
+
+**Uneven walks.** Nothing in the pipeline assumes a circular path or a steady height:
+- cameras are solved per keyframe;
+- the timing is detrended for distance changes;
+- seed pairs for the camera solve include wider ones (§9.3);
+- the tree axis comes from the LEDs, not the path, unless the path is a centred circle (§9.4).
+
+LEDs at the phone's own height line up behind each other in the picture. A walk with the phone near the floor missed 19 of 150, all in the lowest third. A second walk at another height (§11.5) recovers them.
 
 **Measured in simulation:** see §17.
 
@@ -641,7 +650,10 @@ Random seeds are fixed, so the same scan always produces the same map.
 3. **Add the other segments one at a time.**
    - Find each segment's pose with PnP + RANSAC, then triangulate the LEDs it newly adds.
    - After each addition, run bundle adjustment with a robust (Cauchy) loss.
-4. **Multiple starts:** focal-length guesses × the top seed pairs. Keep the solution with the lowest robust error per observation and the most registered segments. A second seed pair is tried even when the first registered every segment, if its fit is poor (rms above 0.8 px). Two keyframes close together on a walk can seed a self-consistent but distorted solution.
+4. **Multiple starts:** focal-length guesses × seed pairs. Keep the solution with the most registered segments and the lowest robust error per observation.
+   - **Which pairs:** the top 2 by shared LEDs × angle (counting angles up to 10°), then the top 4 counting angles up to 25°.
+   - **When to stop:** at the first that registers every segment with a good fit (rms under 0.8 px).
+   - **Why the wider pairs:** walking, neighbouring keyframes are only a few degrees apart. A pair seeded from them can be self-consistent but too poorly conditioned to place the rest; one simulated uneven walk placed 14 of 48 cameras, and the wider pairs fixed it.
 5. **Checks:**
    - **In front:** every point must be in front of the cameras that see it.
    - **Visibility side:** each camera should mostly see LEDs on its own side of the tree. A depth-reversed ("inside-out") solution fails this. LEDs glimpsed through the branches from the far side lower the true share, so the threshold is "clearly above one half": a reversed map scores about one minus the true share.
@@ -658,7 +670,11 @@ Random seeds are fixed, so the same scan always produces the same map.
 
 The largest group agreeing within about 15° wins, and any disagreement is reported. The Map page has a one-tap fix.
 
-**Tree axis.** The turning axis, where the camera poses give it clearly. Otherwise a vertical line fitted jointly over all heights as the center of a cone through the outer LEDs.
+**Tree axis.**
+- **Tripod:** the turning axis, where the camera poses give it clearly.
+- **Walking:** the path's centre isn't the tree's axis: people walk closer on one side, in ovals, off-centre. The axis comes from the LEDs' outline: the centre that minimises the 90th-percentile distance of the LEDs from it, summed over six height bands. The camera circle is used only if the path fits a circle and agrees with the outline within 8% of the tree's radius, which makes it the more precise estimate.
+- **Why the outline:** with an arc of the tree poorly measured, it stays within about 10% of the radius in simulation, where the LEDs' median drifts by about 30%.
+- **Otherwise:** the outline, for either mode.
 
 Both are provisional at this stage and finalised in §9.10.
 
@@ -1023,6 +1039,12 @@ The end-to-end test runs the real server against a virtual phone walking in real
 | All faults, tree 2 | 146 / 150 | 0.11% / 0 | yes (focal −3%) | 148 (+2 single view) | 0.08 cm | 0.45 cm | 2 of 2 |
 | Live frames only, ideal, tree 1 | 150 | 0.21% | yes | 150 | 0.04 cm | 0.12 cm | 2 of 2 |
 | Live frames only, all faults, tree 2 | 146 | 0.11% | yes | 146 (+4 estimated) | 0.06 cm | 0.22 cm | 2 of 2 |
+| Uneven walk, ideal | 148 / 149 | 0 / 0.07% | yes | 149 (+1 estimated) | 0.06 cm | 0.47 cm | 2 of 2 |
+| Uneven walk, all faults | 123 / 144 | 0.99% / 0.84% | yes | 144 (+2 est., 4 unseen) | 0.09 cm | 0.67 cm | 2 of 2 |
+| Uneven, phone near the floor, all faults | 107 / 131 | 1.3% / 1.3% | yes | 130 (+19 estimated) | 0.09 cm | 2.7 cm | 2 of 2 |
+| Uneven, phone above the tree, all faults | 127 / 147 | 0.54% / 0.91% | yes | 147 (+3 estimated) | 0.04 cm | 0.35 cm | 2 of 2 |
+
+"Uneven" walks vary the distance to the tree between 140 and 264 cm, follow an oval path centred 20% of its radius off the tree's axis, and raise and lower the phone by ±25% of the tree's height. On them the tree's axis came out within 0.8–1.6 cm (3–5% of the tree's radius), and "up" within 0.45°. On centred circular walks it's within 0.3 cm.
 
 - **"Wrong identities"** counts detections given an LED whose true image position is more than 45 px away. Light an LED scatters onto branches nearby is counted separately and correctly carries that LED's identity. Most of the remaining "wrong" detections are that same scattered light, landing further away.
 - **The decoding thresholds** were chosen on tree 1's walks. Tree 2, the test suite's walks (a third tree, both configurations, offline and end to end) were not used to choose them.

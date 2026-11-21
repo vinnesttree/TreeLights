@@ -190,3 +190,45 @@ def test_tracking_with_gyro_rotation():
             j = int(np.argmin(np.hypot(*(fr.blobs[:, :2] - r[2:4]).T)))
             labels.add(int(fr.meta["truth"][j]))
         assert len(labels) == 1
+
+
+def test_timing_locks_while_walking_closer_and_further():
+    """Walking closer and further changes the total LED brightness ~10x within seconds;
+    the timing must still lock (the code level is followed by a running median)."""
+    rng = np.random.default_rng(7)
+    offset = 2.3
+    t = np.sort(np.arange(0, 45, 1 / 30) + rng.normal(0, 0.003, 1350))
+    pt = t - offset
+    sub = pt[:, None] + np.linspace(0, 1 / 60, 9)[None, :]
+    level = template(np.floor(sub / T_SLOT).astype(int)).mean(axis=1)
+    distance = 1 + 0.45 * np.sin(2 * np.pi * t / 11) + 0.15 * np.sin(2 * np.pi * t / 3.7)
+    flux = 5000 * level / distance**2 + rng.normal(0, 40, len(t))  # brightness ~ 1/distance^2
+    assert (5000 / distance**2).max() / (5000 / distance**2).min() > 8
+    tm = estimate(t, flux)
+    assert tm.ok and tm.contrast < 0.2
+    err = tm.pattern_time(t) - (pt + 1 / 120)
+    err -= np.round(err / CYCLE_T) * CYCLE_T
+    assert np.abs(err - np.median(err)).max() < 0.012 and abs(np.median(err)) < 0.015
+
+
+def test_tree_axis_from_the_led_outline_when_walking():
+    from treelights.reconstruction.orient import outline_axis_xz, tree_axis_xz
+    from treelights.sim.tree import make_tree
+
+    tree = make_tree(n=300, seed=4, height=130, base_radius=46, bottom=18)
+    P = tree.positions  # true axis at x = z = 0
+    # A circular walk centred 40 cm off the axis: a perfect circle, but not round the tree.
+    ang = np.linspace(0, 2 * np.pi, 40, endpoint=False)
+    path = np.c_[40 + 180 * np.cos(ang), np.full(40, 80.0), 180 * np.sin(ang)]
+    c, src = tree_axis_xz(path, P, walk=True)
+    assert src == "led_outline" and np.hypot(*c) < 0.06 * 46
+    # Centred on the tree: the (more precise) camera circle is used.
+    c, src = tree_axis_xz(path - [40, 0, 0], P, walk=True)
+    assert src == "walk_circle" and np.hypot(*c) < 0.01 * 46
+    # The tripod mode keeps trusting the turning circle.
+    assert tree_axis_xz(path, P, walk=False)[1] == "turning_axis"
+    # One side poorly measured (an arc of the tree missing): the outline barely moves.
+    az = np.arctan2(P[:, 2], P[:, 0])
+    thin = P[np.cos(az - 1.0) < 0.4]
+    assert np.hypot(*outline_axis_xz(thin)) < 0.15 * 46
+    assert np.hypot(*np.median(thin[:, [0, 2]], axis=0)) > 2 * np.hypot(*outline_axis_xz(thin))

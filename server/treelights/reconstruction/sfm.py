@@ -304,6 +304,26 @@ def _incremental(segs: dict[str, SegmentObs], a: str, b: str, init, f0: float, f
 
 
 GOOD_RMS_PX = 0.8  # a start that registers every segment this well needs no second seed pair
+SEED_SCORINGS = ((10.0, 2), (25.0, 4))  # (angle at which the score saturates, pairs to try)
+
+
+def _seed_order(cand: list) -> list:
+    """Seed pairs to try, best first: the top pairs by shared LEDs times angle saturating at
+    10 deg, then those saturating at 25 deg (no duplicates). With a tripod, views are ~45
+    deg apart and the first scoring suffices. Walking, neighbouring keyframes are only a
+    few degrees apart: a pair seeded from them can be self-consistent but too poorly
+    conditioned to place the rest (one simulated uneven walk placed 14 of 48 cameras),
+    and wider pairs fix it."""
+    order, seen = [], set()
+    for full, count in SEED_SCORINGS:
+        ranked = sorted(cand, key=lambda c: -c[0] * min(1.0, c[1] / full))
+        for c in ranked[:count]:
+            if (c[2], c[3]) not in seen:
+                seen.add((c[2], c[3]))
+                order.append(c)
+    return order
+
+
 FREE_F0_MAX_CHANGE = 0.08  # a measured focal length may be refined by at most this (log)
 
 
@@ -328,9 +348,8 @@ def solve_cameras(segs: dict[str, SegmentObs], f0_prior: float | None = None) ->
             n_in, ang = len(init[2]), init[3]
             if ang < 3.0:
                 continue
-            cand.append((n_in * min(1.0, ang / 10.0), a, b, init))
-        cand.sort(key=lambda c: -c[0])
-        for _score, a, b, init in cand[:2]:
+            cand.append((n_in, ang, a, b, init))
+        for _n, _ang, a, b, init in _seed_order(cand):
             try:
                 cams = _incremental(segs, a, b, init, f0, fix_f0=bool(f0_prior))
             except (np.linalg.LinAlgError, ValueError, cv2.error) as e:

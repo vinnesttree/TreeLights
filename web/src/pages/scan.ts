@@ -104,8 +104,8 @@ export function scanPage(): Page {
           h("h2", {}, "How to walk"),
           h("ol", {},
             h("li", {}, h("b", {}, "Tap Start walking. "), "Allow the camera and motion sensors if asked. All LEDs start blinking. That's the pattern being read, so leave them on."),
-            h("li", {}, h("b", {}, "Hold the phone steady, at about the middle height of the tree, "), "pointing at the tree. Don't rotate it between portrait and landscape during the walk."),
-            h("li", {}, h("b", {}, "Walk slowly once around the tree, "), "about a minute for the whole circle. Keep the tree in the middle of the picture and the same distance away. Small steps, no hurry."),
+            h("li", {}, h("b", {}, "Hold the phone steady, pointing at the tree, "), "best at about the middle height of the tree. Don't rotate it between portrait and landscape during the walk."),
+            h("li", {}, h("b", {}, "Walk slowly once around the tree, "), "about a minute for the whole circle, keeping the whole tree in the picture. Your path doesn't need to be a neat circle: going closer or further (around furniture, say) and holding the phone higher or lower is fine. Small steps, no hurry."),
             h("li", {}, h("b", {}, "Watch the ring. "), "Each segment is one side of the tree: it turns yellow when you've passed it and green when enough LEDs were found there. The number in the middle counts the LEDs found so far."),
             h("li", {}, h("b", {}, "Keep going a little past where you started, "), "then tap Stop. Keep this page open while the video uploads and the map is built (a minute or two)."),
           )),
@@ -133,6 +133,7 @@ export function scanPage(): Page {
             h("li", {}, h("b", {}, "The LEDs don't blink when you tap Start: "), "check Setup: the controller must be selected and its realtime check must pass."),
             h("li", {}, h("b", {}, "The upload fails: "), "the map is built from the frames sent during the walk, which works but measures fewer LEDs. Walk again on better Wi-Fi if the result is poor."),
             h("li", {}, h("b", {}, "Few LEDs found on one side: "), "walk that side again, slower and a step further away, using Re-scan on the Map page."),
+            h("li", {}, h("b", {}, "Phone held very low (near the floor) or very high: "), "it works, but LEDs at the same height as the phone line up behind each other in the picture and some are missed. A second walk with the phone at a different height (Re-scan) finds them."),
             h("li", {}, h("b", {}, "The tree is against a wall: "), "walk as far round as you can. The rest is estimated from the wiring, or use the tripod mode (Advanced, on the home page)."),
           )),
       );

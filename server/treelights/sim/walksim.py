@@ -50,7 +50,21 @@ class WalkConfig:
     pattern_level: int = 48
     led_stale_prob: float = 0.0  # chance a displayed frame shows the previous slot (lost/late packets)
     rec_delay_s: float = 0.4  # recording starts after the pattern
+    # The path: by default a circle at a steady height. Real walks aren't.
+    radius_var: float = 0.0  # slow changes of the distance to the tree, as a fraction (0.3 = +-30%)
+    ellipse: float = 0.0  # an oval path: radius x (1 + ellipse) along one direction, (1 - ellipse) across
+    center_offset: float = 0.0  # path centred this fraction of the radius away from the tree's axis
+    height_frac: float | None = None  # camera height within the lit part of the tree (0 bottom, 1 top); None: a bit above the middle
+    height_var: float = 0.0  # slow raising/lowering of the phone, as a fraction of the tree's lit height
     seed: int = 0
+
+    @staticmethod
+    def uneven(**kw) -> "WalkConfig":
+        """A walk the way people actually walk: closer on one side, an oval, off-centre path,
+        and the phone raised and lowered as they go."""
+        base = dict(radius_var=0.2, ellipse=0.15, center_offset=0.2, height_var=0.25)
+        base.update(kw)
+        return WalkConfig(**base)
 
     @staticmethod
     def ideal(**kw) -> "WalkConfig":
@@ -92,8 +106,12 @@ class Walker:
         fit = (span / 2) / np.tan(0.75 * vfov_half) + 0.5 * tree.base_radius
         self.radius = max(cfg.radius_factor * tree.base_radius, fit)
         self.target = np.array([0.0, lit_mid, 0.0])
-        self.height = lit_mid + 0.15 * (tree.height - tree.bottom)
+        y0, y1 = float(tree.positions[:, 1].min()), float(tree.positions[:, 1].max())
+        self.lit = (y0, y1)
+        self.height = lit_mid + 0.15 * (tree.height - tree.bottom) if cfg.height_frac is None else y0 + cfg.height_frac * (y1 - y0)
         self.phi0 = rng.uniform(0, 2 * np.pi)
+        self.path_dir = rng.uniform(0, np.pi)  # orientation of the oval and of the off-centre shift
+        self.path_phase = rng.uniform(0, 2 * np.pi, 3)
         # Speed variation: smooth random modulation of the walking speed.
         self.sv = [(rng.uniform(0.05, 0.25), rng.uniform(0, 2 * np.pi)) for _ in range(3)]
         self.jit = [(rng.uniform(0.25, 1.8), rng.uniform(0, 2 * np.pi), rng.normal(0, 1, 3)) for _ in range(6)]
@@ -114,7 +132,18 @@ class Walker:
         c = self.cfg
         phi = self.phi0 + 2 * np.pi * c.loops * self._progress(t)
         bob = c.bob_cm * np.sin(2 * np.pi * 1.8 * t)
-        C = np.array([self.radius * np.cos(phi), self.height + bob, self.radius * np.sin(phi)])
+        r = self.radius
+        if c.radius_var:  # drifting closer and further, about twice per loop
+            r *= 1 + c.radius_var * np.sin(2 * phi + self.path_phase[0])
+        if c.ellipse:
+            r *= 1 + c.ellipse * np.cos(2 * (phi - self.path_dir))
+        off = c.center_offset * self.radius * np.array([np.cos(self.path_dir), np.sin(self.path_dir)])
+        h = self.height
+        if c.height_var:  # raising and lowering the phone, slowly
+            h += c.height_var * (self.lit[1] - self.lit[0]) * np.sin(3 * phi + self.path_phase[1])
+        C = np.array([off[0] + r * np.cos(phi), h + bob, off[1] + r * np.sin(phi)])
+        # People aim at the middle of what they see; with the tree near the frame's edge
+        # they re-aim, so the camera looks at the tree's middle.
         R, _ = look_at(C, self.target)
         rv = np.zeros(3)
         if c.jitter_deg:
