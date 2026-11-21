@@ -87,22 +87,94 @@ export function scanPage(): Page {
       const msg = h("div");
       const progress = h("div", { class: "progress", style: { display: "none" } }, h("div", { style: { width: "0%" } }));
       const result = h("div");
+      const checks = h("ul", { class: "checklist" }, h("li", { class: "muted" }, "Checking the server..."));
+      const guide = h("div", {},
+        addTo ? h("div", { class: "notice ok" }, `This walk is added to scan ${addTo} and solved together with it. Walk past the LEDs you chose to re-scan (all the way round, or just that side).`) : "",
+        h("div", { class: "card small" },
+          h("h2", {}, "Before you start"),
+          checks,
+          h("ul", { class: "checklist" },
+            h("li", {}, "Dim the room: turn off lamps, ceiling lights and other fairy lights you can. A TV or a window behind the tree is fine, but darker is better."),
+            h("li", {}, "Clear a path all the way around the tree, about 1.5–2 m out, so you can walk without looking down."),
+            h("li", {}, "Use a phone that is charged, on good Wi-Fi near the router. 5 GHz Wi-Fi is best."),
+            h("li", {}, "Wipe the camera lens."),
+            h("li", {}, "Find the starting point: stand where the whole tree, top to bottom, fits in the picture with a little space around it."),
+          )),
+        h("div", { class: "card small" },
+          h("h2", {}, "How to walk"),
+          h("ol", {},
+            h("li", {}, h("b", {}, "Tap Start walking. "), "Allow the camera and motion sensors if asked. All LEDs start blinking. That's the pattern being read, so leave them on."),
+            h("li", {}, h("b", {}, "Hold the phone steady, at about the middle height of the tree, "), "pointing at the tree. Don't rotate it between portrait and landscape during the walk."),
+            h("li", {}, h("b", {}, "Walk slowly once around the tree, "), "about a minute for the whole circle. Keep the tree in the middle of the picture and the same distance away. Small steps, no hurry."),
+            h("li", {}, h("b", {}, "Watch the ring. "), "Each segment is one side of the tree: it turns yellow when you've passed it and green when enough LEDs were found there. The number in the middle counts the LEDs found so far."),
+            h("li", {}, h("b", {}, "Keep going a little past where you started, "), "then tap Stop. Keep this page open while the video uploads and the map is built (a minute or two)."),
+          )),
+      );
+      const guideMore = h("div", {},
+        h("details", { class: "card small" },
+          h("summary", {}, "What the warnings mean"),
+          h("ul", {},
+            h("li", {}, h("b", {}, "Slow down: "), "you're turning faster than the camera can follow; the LEDs smear. Walk slower."),
+            h("li", {}, h("b", {}, "Step back: "), "LEDs are at the edge of the picture. Move further out until the whole tree fits."),
+            h("li", {}, h("b", {}, "Point the camera at the tree: "), "hardly any LEDs are in view."),
+            h("li", {}, h("b", {}, "The blinking pattern isn't being picked up: "), "after about 20 s the server still can't see the pattern. Check that the tree is in view and blinking, and dim the room more."),
+            h("li", {}, h("b", {}, "Reconnecting... keep walking: "), "the Wi-Fi dropped. Keep walking; the walk continues when the phone reconnects (within 15 s)."),
+          )),
+        h("details", { class: "card small" },
+          h("summary", {}, "After you tap Stop"),
+          h("p", {}, "The phone uploads its recording of the walk (it resumes if the connection drops). The server then decodes it together with the frames it received during the walk, and builds the 3D map. You'll see how many LEDs were measured, then you can open the map to check it, run the sweep test, and activate it."),
+          h("p", {}, "LEDs that were hidden from every side are placed from the wiring and marked as estimated. To improve them, use Re-scan on the Map page and walk past that side again."),
+        ),
+        h("details", { class: "card small" },
+          h("summary", {}, "If something goes wrong"),
+          h("ul", {},
+            h("li", {}, h("b", {}, "The camera doesn't start: "), "allow camera access for this site in Chrome (lock icon next to the address), then reload."),
+            h("li", {}, h("b", {}, "\"Using the basic orientation events\": "), "fine; the scan still works. The map is built from the video either way."),
+            h("li", {}, h("b", {}, "The LEDs don't blink when you tap Start: "), "check Setup: the controller must be selected and its realtime check must pass."),
+            h("li", {}, h("b", {}, "The upload fails: "), "the map is built from the frames sent during the walk, which works but measures fewer LEDs. Walk again on better Wi-Fi if the result is poor."),
+            h("li", {}, h("b", {}, "Few LEDs found on one side: "), "walk that side again, slower and a step further away, using Re-scan on the Map page."),
+            h("li", {}, h("b", {}, "The tree is against a wall: "), "walk as far round as you can. The rest is estimated from the wiring, or use the tripod mode (Advanced, on the home page)."),
+          )),
+      );
+      const key = (sw: HTMLElement, text: string) => h("span", { class: "key" }, sw, text);
+      const legend = h("div", { class: "ring-legend small" },
+        key(h("span", { class: "sw", style: { background: "rgba(150,150,150,.6)" } }), "not passed yet"),
+        key(h("span", { class: "sw", style: { background: "rgb(240,190,60)" } }), "passed"),
+        key(h("span", { class: "sw", style: { background: "rgb(60,200,110)" } }), "enough LEDs found"),
+        key(h("span", { class: "sw dot" }), "where you are now"));
       root.append(
         h("h1", {}, "Scan the tree"),
-        addTo ? h("div", { class: "notice ok" }, `This walk is added to scan ${addTo} and solved together with it.`) : "",
-        h("div", { class: "card small" },
-          h("ol", {},
-            h("li", {}, "Turn off other lights you can. Stand far enough back that the whole tree fits in the picture."),
-            h("li", {}, "Tap Start. All LEDs start blinking; hold the phone upright and keep the tree in the middle of the picture."),
-            h("li", {}, "Walk slowly, at an even pace, once around the tree (about a minute). The ring fills in as you go."),
-            h("li", {}, "When you're back where you started, tap Stop. The video is uploaded and the map is built."),
-          )),
+        guide,
         wrap,
+        legend,
         h("div", { class: "row" }, startBtn, stopBtn),
         progress,
         msg,
         result,
+        guideMore,
       );
+      runChecks();
+
+      // The server's side of the checklist: controller, LED count, tree height, map warnings.
+      async function runChecks() {
+        const item = (ok: boolean | null, text: string, link?: [string, string]) =>
+          h("li", { class: ok === null ? "info" : ok ? "ok" : "bad" }, text, link ? " " : "", link ? h("a", { href: link[0] }, link[1]) : "");
+        try {
+          const s = await api("/api/state");
+          const host = s.wled?.host;
+          const items = [
+            item(!!host, host ? `Controller: ${host}${s.wled.version ? ` (WLED ${s.wled.version})` : ""}` : "No WLED controller selected yet.", host ? undefined : ["#/setup", "Open Setup"]),
+            ...(host ? [item(s.wled.monitor_ok !== false, s.wled.monitor_ok === false ? "The controller isn't answering right now." : `LEDs: ${s.led_count}`,
+              s.wled.monitor_ok === false ? ["#/setup", "Check Setup"] : undefined)] : []),
+            item(s.tree_height_cm ? true : null, s.tree_height_cm ? `Tree height: ${s.tree_height_cm} cm` : "No tree height entered: the map will be in tree heights instead of cm (optional).", s.tree_height_cm ? undefined : ["#/setup", "Enter it"]),
+          ];
+          if (s.lease && s.lease.owner !== "walk") items.push(item(false, `The LEDs are in use (${s.lease.kind}). Stop the test animation or capture first.`, ["#/test", "Test page"]));
+          if (s.map_warning) items.push(item(null, s.map_warning));
+          checks.replaceChildren(...items);
+        } catch (e) {
+          checks.replaceChildren(item(false, `Couldn't reach the server: ${fmtErr(e)}`));
+        }
+      }
       cam = new CameraCapture(video);
       drawRing();
 
@@ -182,7 +254,13 @@ export function scanPage(): Page {
         };
       }
 
+      function showGuide(on: boolean) {
+        guide.style.display = guideMore.style.display = on ? "" : "none";
+        if (!on) wrap.scrollIntoView({ block: "start", behavior: "smooth" });
+      }
+
       function beginWalk() {
+        showGuide(false);
         state = "walking";
         walkStart = phoneNow();
         startBtn.style.display = "none";
@@ -387,7 +465,7 @@ export function scanPage(): Page {
             ...(q.warnings ?? []).map((w: string) => h("div", { class: "notice warn" }, w)),
             h("div", { class: "row" },
               h("a", { href: `#/map?id=${job.result.map}` }, h("button", { class: "primary" }, "Review the map")),
-              h("button", { onclick: () => { state = "idle"; startBtn.style.display = ""; startBtn.disabled = false; result.replaceChildren(); } },
+              h("button", { onclick: () => { state = "idle"; startBtn.style.display = ""; startBtn.disabled = false; result.replaceChildren(); showGuide(true); runChecks(); } },
                 "Scan again")),
           ));
         } catch (e) {
@@ -397,6 +475,8 @@ export function scanPage(): Page {
           setMsg(`Building the map failed: ${fmtErr(e)}`, "fail");
           startBtn.style.display = "";
           startBtn.disabled = false;
+          showGuide(true);
+          runChecks();
         }
       }
     },
