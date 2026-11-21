@@ -78,6 +78,7 @@ docker compose -f docker/docker-compose.yml logs treelights   # shows the URL an
    - Fix problems by marking an LED bad, moving it, or adding or removing a chain break, then re-solve.
    - **Link limits:** tap an LED to see its link to the next LED (length, allowed maximum, kind) and set your own bound for it. The *Link limits* card shows the learned spacing and sets a cap that no link may exceed.
    - *Activate* the version you want. The previous one stays available for roll-back.
+   - **Recordings:** run old walks through the current version. *Decode again* re-reads a walk's stored recording and live frames; *Solve again* re-runs the 3D solve on the LEDs decoded before. Both make a new map version. Raw recordings are kept for the 2 most recent scans and the active map's scan; to keep more, raise `raw_frame_retention_scans` (`curl -k -X PUT https://<host>:<port>/api/config -H 'Content-Type: application/json' -d '{"raw_frame_retention_scans": 10}'`).
    - **Re-scan** weak spots: choose LEDs (or *All low-confidence*), *Show on tree* to see where they are, then *Set up re-scan*. For a walk scan, walk again past them; for a tripod scan, start the re-scan view from Control. The result is solved with the original capture into a new version.
 4. **Test.** Run the sweep test and check it looks clean on the tree. *Status colors* shows which LEDs were measured (green), placed from one view (yellow), estimated (orange) or are unknown (off).
 

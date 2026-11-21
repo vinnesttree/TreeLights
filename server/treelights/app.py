@@ -17,7 +17,7 @@ import numpy as np
 from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 
-from . import __version__, camcal
+from . import __version__, camcal, storage
 from .capture import video as videomode
 from .capture.session import CaptureSession
 from .capture.store import ScanStore
@@ -719,6 +719,37 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
         return {"ok": True, "count": len(leds)}
 
     # ---- walk-around capture (§7.9) -----------------------------------------------------------
+    @app.get("/api/walks")
+    def walks() -> list[dict]:
+        """Every walk recorded, newest first, with what's still on disk: the raw recording and
+        live frames (needed to decode again; old scans' raw data is pruned, §13) and the
+        decoded keyframes (kept; enough to solve again)."""
+        out = []
+        active = state.maps.active()
+        for p in sorted(state.scans.dir.iterdir(), reverse=True):
+            try:
+                scan = state.scans.get(p.name)
+            except FileNotFoundError:
+                continue
+            for v in scan.meta.get("views", []):
+                if v.get("mode") != "walk":
+                    continue
+                wdir = scan.root / "walk" / v["id"]
+                video = scan.root / "videos" / f"{v['id']}.upload"
+                live = wdir / "live"
+                obs = storage.read_json(wdir / "observations.json", default=None) or {}
+                out.append({
+                    "scan": scan.id, "view": v["id"], "created": scan.meta.get("created"), "status": v.get("status"),
+                    "duration_s": v.get("duration_s"),
+                    "video_mb": round(video.stat().st_size / 1e6, 1) if video.exists() else 0.0,
+                    "live_frames": sum(1 for _ in live.glob("*.jpg")) if live.is_dir() else 0,
+                    "keyframes": len(obs.get("segments", {})),
+                    "decoded": (obs.get("info") or {}).get("decoded"),
+                    "active_map_scan": bool(active and active.get("scan") == scan.id),
+                    "busy": bool(state.walk and state.walk.scan.id == scan.id and state.walk.vid == v["id"] and state.walk.state == "walking"),
+                })
+        return out
+
     @app.post("/api/scans/{sid}/walk/{vid}/process")
     async def walk_process(sid: str, vid: str, body: dict = Body(default={})) -> dict:
         """Decode the walk's live frames and uploaded recording (if any), then solve."""
@@ -727,6 +758,11 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
         except FileNotFoundError:
             raise HTTPException(404, "no such scan")
         use_video = body.get("video", True) and p.exists() and p.stat().st_size > 0
+        live = state.scans.get(sid).root / "walk" / vid / "live"
+        if not use_video and not (live.is_dir() and any(live.glob("*.jpg"))):
+            raise HTTPException(409, "This walk's recording and live frames are no longer stored (old scans' raw data is "
+                                     "deleted to save space), so it can't be decoded again. Solve the scan again instead: "
+                                     "that uses the keyframes decoded before.")
         return state.start_walk_processing(sid, vid, str(p) if use_video else None).to_dict()
 
     # ---- maps -----------------------------------------------------------------------------

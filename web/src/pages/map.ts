@@ -13,6 +13,7 @@ export function mapPage(): Page {
       const editsBox = h("div", { class: "small" });
       const rescanBox = h("div");
       const limitsBox = h("div");
+      const recBox = h("div");
       let map: TreeMap | null = null;
       let overrides: any = {};
       let selected: number | null = null;
@@ -51,6 +52,7 @@ export function mapPage(): Page {
         renderEdits();
         renderLimits();
         renderRescan();
+        renderRecordings();
         selectLed(null);
       }
 
@@ -303,6 +305,71 @@ export function mapPage(): Page {
         }
       }
 
+      // ---- decoding old walks again with the current version ----
+      async function renderRecordings() {
+        let list: any[] = [];
+        try {
+          list = await api<any[]>("/api/walks");
+        } catch (e) {
+          recBox.replaceChildren(h("h2", {}, "Recordings"), h("div", { class: "notice fail" }, fmtErr(e)));
+          return;
+        }
+        const recMsg = h("div");
+        const rows = list.map((w) => {
+          const raw = w.video_mb > 0 || w.live_frames > 0;
+          const what = [w.video_mb > 0 ? `recording ${w.video_mb} MB` : "", w.live_frames ? `${w.live_frames} live frames` : ""].filter(Boolean).join(", ");
+          return h("div", { class: "rec-row" },
+            h("div", {},
+              h("b", {}, `${w.created ?? w.scan} · ${w.view}`), map && w.scan === map.scan ? h("span", { class: "pill ok", style: { marginLeft: "6px" } }, "this map") : "",
+              h("div", { class: "small muted" },
+                `${w.duration_s ? Math.round(w.duration_s) + " s walk · " : ""}${w.decoded ? `decoded ${Object.entries(w.decoded).map(([k, v]) => `${v} (${k})`).join(", ")} · ` : ""}`,
+                raw ? `stored: ${what}` : "raw recording deleted (older scan); keyframes kept")),
+            h("div", { class: "row" },
+              h("button", { disabled: !raw || w.busy, title: raw ? "" : "The raw recording of this walk is no longer stored", onclick: () => reprocess(w, recMsg) }, "Decode again"),
+              h("button", { disabled: w.keyframes === 0 || w.busy, onclick: () => resolveScan(w.scan, recMsg) }, "Solve again")),
+          );
+        });
+        recBox.replaceChildren(
+          h("h2", {}, "Recordings"),
+          h("p", { class: "small muted" },
+            "Run old walks through the current version of TreeLights. Decode again re-reads the stored recording and live frames, then builds a new map version. ",
+            "Solve again only re-runs the 3D solve on the LEDs decoded before (always possible). The active map doesn't change until you activate the new version."),
+          list.length ? h("div", {}, ...rows) : h("div", { class: "muted small" }, "No walks recorded yet."),
+          recMsg,
+          h("p", { class: "small muted" }, "To save space, the raw recordings of all but the 2 most recent scans (and the active map's scan) are deleted when a new scan starts."),
+        );
+      }
+
+      async function waitJob(job: any, recMsg: HTMLElement, what: string): Promise<void> {
+        recMsg.replaceChildren(h("div", { class: "notice warn" }, `${what}... this can take a few minutes.`));
+        while (job.status === "running") {
+          await new Promise((r) => setTimeout(r, 2000));
+          job = await api(`/api/jobs/${job.id}`);
+        }
+        if (job.status !== "done") throw new Error(job.error ?? "failed");
+        const c = job.result.quality.counts;
+        recMsg.replaceChildren(h("div", { class: "notice ok" }, `New version ${job.result.map}: ${c.measured} measured, ${c.estimated} estimated, ${c.unknown} unknown. Showing it now; activate it if it looks right.`));
+        await loadVersions(job.result.map);
+      }
+
+      async function reprocess(w: any, recMsg: HTMLElement) {
+        try {
+          const job = await api(`/api/scans/${w.scan}/walk/${w.view}/process`, { body: { video: w.video_mb > 0 } });
+          await waitJob(job, recMsg, `Decoding ${w.view} of ${w.created ?? w.scan} again`);
+        } catch (e) {
+          recMsg.replaceChildren(h("div", { class: "notice fail" }, fmtErr(e)));
+        }
+      }
+
+      async function resolveScan(scan: string, recMsg: HTMLElement) {
+        try {
+          const job = await api(`/api/scans/${scan}/solve`, { body: {} });
+          await waitJob(job, recMsg, "Solving again");
+        } catch (e) {
+          recMsg.replaceChildren(h("div", { class: "notice fail" }, fmtErr(e)));
+        }
+      }
+
       async function activate(force = false) {
         if (!map) return;
         try {
@@ -345,10 +412,12 @@ export function mapPage(): Page {
         h("div", { class: "card", style: { marginTop: "12px" } }, sel, editsBox),
         h("div", { class: "card" }, limitsBox),
         h("div", { class: "card" }, rescanBox),
+        h("div", { class: "card" }, recBox),
         h("div", { class: "card" }, h("h2", {}, "Quality report"), report),
       );
       const id = new URLSearchParams(location.hash.split("?")[1] ?? "").get("id") ?? undefined;
       loadVersions(id).catch((e) => show(fmtErr(e), "fail"));
+      renderRecordings();
     },
     unmount() {
       viewer?.dispose();

@@ -895,6 +895,7 @@ Use the same flow when the tree has settled or been bumped.
   - A crash loses at most the frame being written.
 - **Retention.**
   - Raw frames, live walk frames and recordings are kept for the active map's scan and the 2 most recent scans (configurable). Decoded walk keyframes and the orientation log are kept.
+  - The Map page's *Recordings* card runs old walks through the current version: *Decode again* while a walk's raw data exists, *Solve again* (from the kept keyframes) always.
   - Detections are small and kept forever.
   - A full scan's frames take about 0.3–0.5 GB.
 - **Reproducibility.** Each map records its inputs: the scan, overrides, parameters and software version.
@@ -990,6 +991,7 @@ docker/              Dockerfile, docker-compose.yml
 - **Video:** `POST /api/scans/{scan}/sequence/play`, and `POST /api/scans/{scan}/videos` (resumable upload)
 - **Solving:** `POST /api/scans/{scan}/solve` returns a job; `GET /api/jobs/{job}`
 - **Maps:** `GET /api/maps`, `GET /api/maps/{map}`, `POST /api/maps/{map}/activate`, `GET /api/maps/{map}/export?fmt=json|csv`
+- **Walks:** `GET /api/walks` (every walk, with its stored recording, live frames and decoded keyframes); decoding a stored walk again with the current version is the same `POST /api/scans/{scan}/walk/{view}/process` (refused with a reason once the raw data has been pruned; solving the scan again then uses the stored keyframes).
 - **Re-scan (§11.5):** `GET /api/maps/{map}/rescan` (the low-confidence LEDs), `POST /api/maps/{map}/rescan {leds | text | low_confidence}`, `POST /api/leds/show {leds}`; the tripod view starts with `start_view {mode: "rescan"}` on `/ws/control`.
 - **Test animation:** `POST /api/test/start`, `POST /api/test/stop`, and `WSS /ws/preview` (live colors for the 3D view)
 - **Camera calibration:** `POST /api/camera-profiles`
