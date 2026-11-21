@@ -12,6 +12,7 @@ export function homePage(): Page {
             h("li", {}, h("a", { href: "#/scan" }, "Scan"), ": open this on your phone and walk once around the tree with the camera running."),
             h("li", {}, h("a", { href: "#/map" }, "Map"), ": review, fix and activate the 3D map."),
             h("li", {}, h("a", { href: "#/test" }, "Test"), ": run the sweep test on the real tree."),
+            h("li", {}, h("a", { href: "#/effects" }, "Effects"), ": 3D volumetric effects and surface patterns, with WLED-style colors and palettes."),
           ),
         ),
         h("div", { class: "card small" },

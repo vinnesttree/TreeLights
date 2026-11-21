@@ -2,7 +2,7 @@
 
 TreeLights finds the 3D position of every addressable LED on a Christmas tree using an Android phone's camera in Chrome. You walk once around the tree with the camera running while every LED blinks its own index; the phone's orientation sensor tells which side of the tree each frame sees. The LEDs are driven through stock WLED, and everything runs in one Docker container on a Linux computer on your network.
 
-The result is a 3D map of the tree. The map stores the wiring order, a per-LED uncertainty and a surface model, so 3D effects can be built on it. For now there is one test animation that sweeps planes and a sphere through the tree.
+The result is a 3D map of the tree. The map stores the wiring order, a per-LED uncertainty and a surface model. The **Effects** page uses it: 3D volumetric effects that fill the tree's volume, and patterns painted on its surface. Colors, palettes and sliders work much like WLED's.
 
 The design, including a failure analysis and how each failure is handled, is in [`architecture.md`](architecture.md).
 
@@ -81,6 +81,28 @@ docker compose -f docker/docker-compose.yml logs treelights   # shows the URL an
    - **Recordings:** run old walks through the current version. *Decode again* re-reads a walk's stored recording and live frames; *Solve again* re-runs the 3D solve on the LEDs decoded before. Both make a new map version. Raw recordings are kept for the 2 most recent scans and the active map's scan; to keep more, raise `raw_frame_retention_scans` (`curl -k -X PUT https://<host>:<port>/api/config -H 'Content-Type: application/json' -d '{"raw_frame_retention_scans": 10}'`).
    - **Re-scan** weak spots: choose LEDs (or *All low-confidence*), *Show on tree* to see where they are, then *Set up re-scan*. For a walk scan, walk again past them; for a tripod scan, start the re-scan view from Control. The result is solved with the original capture into a new version.
 4. **Test.** Run the sweep test and check it looks clean on the tree. *Status colors* shows which LEDs were measured (green), placed from one view (yellow), estimated (orange) or are unknown (off).
+
+## Effects
+
+The **Effects** page runs effects on the tree. It works like WLED's: choose an effect, set its sliders, pick up to three colors and a palette. Changes apply live while the effect runs, and the 3D preview shows what the LEDs show.
+
+- **3D volumetric** (needs a map). Shapes and fields fill the tree's volume, using every LED's 3D position, inner LEDs included: Plane Sweep, Lighthouse, Ripples 3D, Plasma 3D, Noise 3D, Fire 3D, Snowfall, Fireworks 3D, Orbs, Helix 3D, Vortex, Rotating Cube.
+- **Surface patterns** (needs a map). Patterns are painted on the tree's outer surface, from the map's surface model: Candy Stripes, Rings, Waves, Zig-Zag, Checkerboard, Polka Dots, Argyle, Garland, Marble.
+  - The patterns join up seamlessly all the way round the tree.
+  - Checks and dots keep their shape from the bottom of the tree to the top.
+  - *Depth fade* dims LEDs inside the tree, so only the outer shell shows the pattern.
+- **Basic** (no map needed): Solid, Palette Flow, Twinkle.
+- **Sliders:** *Speed*, plus up to four effect-specific sliders (0–255, as in WLED). Choosing an effect loads its own slider defaults and keeps your colors. Changing the speed never makes the animation jump.
+- **Colors:** three slots (*Color 1*, *Background*, *Color 3*; some effects name them differently), set with a color picker or the quick colors.
+- **Palettes:**
+  - *Default*: the effect's own palette.
+  - Gradients: the FastLED/WLED classics (Party, Cloud, Lava, Ocean, Forest, Rainbow, Rainbow Bands) and others, such as Fire, Candy Cane, Christmas, Classic Bulbs, Aurora and Ice.
+  - Palettes built from your colors: *\* Color 1*, *\* Colors 1&2*, *\* Color Gradient*, *\* Colors Only*.
+  - *\* Random Cycle*: blends to a new random palette every few seconds.
+- **API:**
+  - `GET /api/effects` lists the effects (with their sliders and defaults), the palettes and the running effect.
+  - `POST /api/test/start` with `{"effect": "helix", "brightness": 0.5, "params": {"speed": 128, "intensity": 90, "c1": 70, "c2": 100, "c3": 0, "palette": "ocean", "colors": ["#ff0000", "#000000", "#000000"]}}` starts an effect.
+  - `POST /api/effects/params` with `{"params": {...}, "brightness": 0.7}` changes the running effect without restarting it.
 
 **Advanced: tripod capture.** For a tree that can be turned, or one you can't walk around (see *Advanced* on the home page):
 1. *Camera calibration* (optional, once per phone): show the board on a computer screen and capture about 15 views.

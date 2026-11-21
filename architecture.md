@@ -863,7 +863,26 @@ Use the same flow when the tree has settled or been bumped.
 - **Identify:** blink one chosen LED.
 - **Before any map exists:** an index chase along the string instead.
 - **Rendering:** 40 fps in the output thread.
-- **Effect interface** (`TreeGeometry`, and `Effect.render(t, dt, out)`). It is defined now so that later effects plug in without changing the architecture.
+- **Effect interface** (`TreeGeometry`, and `Effect.render(t, out)`, driven by `Effect.frame`).
+  - `frame` keeps the effect's own time `T`, scaled by the speed slider, so a speed change never jumps.
+  - `frame` also turns off LEDs without a position in effects that need a map.
+- **Effect library** (`effects/volumetric.py`, `surface.py`, `basic.py`), on the Effects page.
+  - **Parameters, WLED style** (`Params`): speed, intensity, three custom sliders `c1`–`c3` (0–255), three color slots and a palette.
+  - Each effect declares which sliders it uses, with labels, their defaults, its color slots and its default palette. `GET /api/effects` serves these to the UI.
+  - `POST /api/effects/params` changes the running effect's parameters and brightness in place.
+- **Coordinates.**
+  - Volumetric effects work in normalised 3D coordinates: y runs from 0 (lowest LED) to 1 (highest LED), with x and z in the same units.
+  - Surface patterns unwrap the surface model's cone as u (angle around the axis, 0–1) and v (height).
+  - Repeats around the tree are whole numbers, so patterns join seamlessly.
+  - Per-row repeat counts come from the circumference at that height, so checks and dots keep their shape.
+  - The `c3` slider (*Depth fade*) fades inner LEDs to the background, using `depth` = r / surface radius.
+- **Palettes** (`effects/palettes.py`).
+  - Each palette is a 256-entry gradient, sampled with a position that wraps.
+  - Hard edges come from repeated stop positions.
+  - Some palettes are built from the color slots: Color 1, Colors 1&2, Color Gradient and Colors Only.
+  - Random Cycle blends to a new random palette every 5 s.
+- **Noise** (`effects/noise.py`): vectorised 3D value noise and fBm for Noise 3D, Fire 3D and Marble.
+  - Every library effect renders 800 LEDs in about 1 ms or less.
 - **Power cap.**
   - Each frame's current draw is estimated from its RGB values, using a configurable mA per channel.
   - Brightness is scaled down to stay within WLED's configured limit (from `/json/info`), or a limit set in Setup.
@@ -971,7 +990,8 @@ server/treelights/
   reconstruction/    camera model, poses, bundle adjustment, orientation, hypotheses,
                      chain selection, bounds, refinement, surface, filling, quality
   maps/              map model, versions, overrides, alignment, export
-  effects/           TreeGeometry, effect interface, sweep test
+  effects/           TreeGeometry, effect interface, test animations, palettes, noise,
+                     3D volumetric effects, surface patterns, basic effects
   workers.py         process pool and job queue
 web/                 Vite + TypeScript + three.js
 server/treelights/sim/  synthetic tree, scene renderer, virtual WLED, virtual phone, synthetic videos, simulated rig

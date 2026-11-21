@@ -5,6 +5,7 @@ import { calibratePage } from "./pages/calibrate";
 import { controlPage } from "./pages/control";
 import { mapPage } from "./pages/map";
 import { testPage } from "./pages/test";
+import { effectsPage } from "./pages/effects";
 import { homePage } from "./pages/home";
 import { camcalPage } from "./pages/camcal";
 import { scanPage } from "./pages/scan";
@@ -17,6 +18,7 @@ const routes: Record<string, () => Page> = {
   control: controlPage,
   map: mapPage,
   test: testPage,
+  effects: effectsPage,
   camcal: camcalPage,
 };
 

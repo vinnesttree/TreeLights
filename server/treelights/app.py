@@ -22,7 +22,7 @@ from .capture import video as videomode
 from .capture.session import CaptureSession
 from .capture.store import ScanStore
 from .config import ConfigStore
-from .effects import EFFECTS, Identify, TreeGeometry, make_renderer
+from .effects import EFFECTS, LIBRARY, PALETTE_IDS, Identify, TreeGeometry, catalogue, library, make_renderer
 from .maps import guidance as guide
 from .maps import rescan
 from .maps.store import ActivationBlocked, MapStore, export_csv
@@ -81,6 +81,7 @@ class AppState:
         self.guidance: dict | None = None
         self.control_clients: set[asyncio.Queue] = set()
         self.test_owner: str | None = None
+        self.effect_renderer = None  # the running library effect, changeable live
         self._apply_sender()
 
     # ---- output configuration ------------------------------------------------
@@ -298,7 +299,10 @@ class AppState:
         return job
 
     # ---- test animation --------------------------------------------------------------------
-    def start_effect(self, name: str, brightness: float, index: int | list[int] | None = None) -> None:
+    def start_effect(self, name: str, brightness: float, index: int | list[int] | None = None,
+                     params: dict | None = None) -> str:
+        """Start an effect on the LEDs; returns the effect actually running (the index chase
+        stands in for effects that need a map when there is none)."""
         owner = "test"
         kind = "identify" if name == "identify" else "test"
         ok, holder = self.output.acquire(owner, kind, ttl=3600)
@@ -312,15 +316,48 @@ class AppState:
         else:
             if name not in EFFECTS:
                 raise HTTPException(404, f"unknown effect {name}")
-            if name != "chase" and not tree.has_pos.any():
+            if EFFECTS[name].needs_map and not tree.has_pos.any():
                 name = "chase"  # no map yet: index chase
-            eff = EFFECTS[name]()
+            self._check_params(params)
+            try:
+                eff = EFFECTS[name](params)
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
         eff.setup(tree)
-        self.output.set_renderer(owner, make_renderer(eff, brightness), fps=40)
+        renderer = make_renderer(eff, brightness)
+        self.output.set_renderer(owner, renderer, fps=40)
         self.test_owner = owner
+        self.effect_renderer = renderer if name in LIBRARY else None
+        return name
+
+    @staticmethod
+    def _check_params(params: dict | None) -> None:
+        if params and params.get("palette") is not None and params["palette"] not in PALETTE_IDS:
+            raise HTTPException(422, f"unknown palette {params['palette']}")
+
+    def update_effect(self, params: dict | None, brightness: float | None) -> dict:
+        """Change the running library effect's sliders, palette, colors or brightness without restarting it."""
+        r = self.effect_renderer
+        if r is None or not self.output.holds("test"):
+            raise HTTPException(409, "No effect is running.")
+        self._check_params(params)
+        try:
+            r.effect.set_params(params)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        if brightness is not None:
+            r.brightness = float(min(max(brightness, 0.0), 1.0))
+        return self.effect_state()
+
+    def effect_state(self) -> dict | None:
+        r = self.effect_renderer
+        if r is None or not self.output.holds("test"):
+            return None
+        return {"effect": r.effect.name, "params": r.effect.params.to_dict(), "brightness": r.brightness}
 
     def stop_effect(self) -> None:
         self.output.release("test")
+        self.effect_renderer = None
 
 
 def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
@@ -808,8 +845,19 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
     # ---- test animation ------------------------------------------------------------------
     @app.post("/api/test/start")
     def test_start(body: dict = Body(default={})) -> dict:
-        state.start_effect(body.get("effect", "sweep"), float(body.get("brightness", 0.5)))
-        return {"ok": True}
+        running = state.start_effect(body.get("effect", "sweep"), float(body.get("brightness", 0.5)),
+                                     params=body.get("params"))
+        return {"ok": True, "effect": running}
+
+    # ---- effects library -----------------------------------------------------------------
+    @app.get("/api/effects")
+    def effects_list() -> dict:
+        return {"effects": library(), "palettes": catalogue(), "current": state.effect_state()}
+
+    @app.post("/api/effects/params")
+    def effects_params(body: dict = Body(default={})) -> dict:
+        b = body.get("brightness")
+        return {"ok": True, "current": state.update_effect(body.get("params"), None if b is None else float(b))}
 
     @app.post("/api/test/stop")
     def test_stop() -> dict:
