@@ -1,0 +1,43 @@
+# TreeLights stack for Dockge (or plain `docker compose up -d` in this folder).
+#
+# Docker builds the image straight from the GitHub repository, so this file is all
+# the stack needs: no clone. The first deploy takes a few minutes (it builds the web
+# app and installs the Python packages); later ones reuse the build cache.
+#
+# PORTS: set HTTPS_PORT and HTTP_PORT below (change the number after ":-"), or in a
+# .env file next to this file:
+#     HTTPS_PORT=9443
+#     HTTP_PORT=9080
+# The stack uses host networking, so these are the ports on the host itself; pick
+# ones nothing else on the host uses. If a port is taken, the container log says so.
+#
+# Updating: `pull_policy: build` makes every `docker compose up` rebuild from the
+# latest commit of the branch below, so redeploying the stack (in Dockge, or
+# `docker compose up -d` in this folder) updates it.
+#
+# Data (config, certificates, scans, maps) is kept next to this file in ./data,
+# e.g. /opt/stacks/treelights/data.
+services:
+  treelights:
+    build:
+      # <repository>#<branch>. Change the branch to "main" once the work is merged there.
+      context: https://github.com/vinnesttree/TreeLights.git#ccr-8f206c85-x6h39j
+      dockerfile: docker/Dockerfile
+    image: treelights:local
+    pull_policy: build
+    container_name: treelights
+    # Host networking (Linux hosts): needed for mDNS discovery of WLED and for sending
+    # DDP to it. No `ports:` section: the app listens on the host's ports directly.
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+    environment:
+      TREELIGHTS_DATA: /data
+      # The app over HTTPS (the phone's camera needs HTTPS). Open https://<host>:<this port>/
+      TREELIGHTS_HTTPS_PORT: ${HTTPS_PORT:-8443}
+      # Plain-HTTP setup page: QR code, help, optional CA certificate. http://<host>:<this port>/
+      TREELIGHTS_HTTP_PORT: ${HTTP_PORT:-8080}
+      # The HTTPS certificate covers the host's LAN addresses, detected automatically.
+      # If the phone can't connect (several network interfaces, VPNs), set it here:
+      # TREELIGHTS_HOST_IPS: 192.168.1.20
