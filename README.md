@@ -91,6 +91,10 @@ The **Effects** page runs effects on the tree. It works like WLED's: choose an e
   - The patterns join up seamlessly all the way round the tree.
   - Checks and dots keep their shape from the bottom of the tree to the top.
   - *Depth fade* dims LEDs inside the tree, so only the outer shell shows the pattern.
+- **Inspired by Matt Parker's tree** (Stand-up Maths, [2020](https://github.com/standupmaths/xmastree2020) and [2021](https://github.com/standupmaths/xmastree2021)).
+  - The animations made for his tree were shared as pre-rendered frames for his own 500 LEDs, so they can't play on another tree. These are new versions of the same ideas, computed live from your map and adjustable like the others.
+  - Effects (needs a map): Two-Tone Spin (his 2020 animation: a plane spinning through the tree, a different color on each side), Bouncing Balls (balls drop, fall under gravity and bounce to rest), Explosions, Rainbow Explosion, Rainbow Implosion, Rainbow Ripple, Rainbow Spin / Corkscrew, Equalizer, Color Lerp, Particle Accelerator, Pulsing Heart, Santa Hat.
+  - Morse Xmas (flashes MERRY XMAS in Morse code) needs no map.
 - **Basic** (no map needed): Solid, Palette Flow, Twinkle.
 - **Sliders:** *Speed*, plus up to four effect-specific sliders (0–255, as in WLED). Choosing an effect loads its own slider defaults and keeps your colors. Changing the speed never makes the animation jump.
 - **Colors:** three slots (*Color 1*, *Background*, *Color 3*; some effects name them differently), set with a color picker or the quick colors.

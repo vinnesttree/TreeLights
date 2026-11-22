@@ -866,7 +866,8 @@ Use the same flow when the tree has settled or been bumped.
 - **Effect interface** (`TreeGeometry`, and `Effect.render(t, out)`, driven by `Effect.frame`).
   - `frame` keeps the effect's own time `T`, scaled by the speed slider, so a speed change never jumps.
   - `frame` also turns off LEDs without a position in effects that need a map.
-- **Effect library** (`effects/volumetric.py`, `surface.py`, `basic.py`), on the Effects page.
+- **Effect library** (`effects/volumetric.py`, `surface.py`, `gift.py`, `basic.py`), on the Effects page.
+  - `gift.py` holds effects inspired by Matt Parker's GIFT-format tree and its community examples. They are reimplemented live from the map; the examples were pre-rendered for his LEDs.
   - **Parameters, WLED style** (`Params`): speed, intensity, three custom sliders `c1`–`c3` (0–255), three color slots and a palette.
   - Each effect declares which sliders it uses, with labels, their defaults, its color slots and its default palette. `GET /api/effects` serves these to the UI.
   - `POST /api/effects/params` changes the running effect's parameters and brightness in place.
@@ -991,7 +992,8 @@ server/treelights/
                      chain selection, bounds, refinement, surface, filling, quality
   maps/              map model, versions, overrides, alignment, export
   effects/           TreeGeometry, effect interface, test animations, palettes, noise,
-                     3D volumetric effects, surface patterns, basic effects
+                     3D volumetric effects, surface patterns, effects after Matt Parker's tree,
+                     basic effects
   workers.py         process pool and job queue
 web/                 Vite + TypeScript + three.js
 server/treelights/sim/  synthetic tree, scene renderer, virtual WLED, virtual phone, synthetic videos, simulated rig

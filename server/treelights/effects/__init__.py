@@ -1,17 +1,19 @@
 """Effects (architecture §12): the effect interface, WLED-style palettes and parameters, the test
-animations, and the effect library (3D volumetric, surface patterns, basic)."""
+animations, and the effect library (3D volumetric, surface patterns, effects inspired by Matt Parker's
+tree, basic)."""
 
 from __future__ import annotations
 
 from .base import (SLIDERS, Chase, Effect, Identify, Params, Renderer, StatusColors, SweepTest, TreeGeometry,
                    make_renderer)
 from .basic import EFFECTS_BASIC
+from .gift import EFFECTS_GIFT
 from .palettes import DYNAMIC, GRADIENTS, PaletteBank, catalogue
 from .surface import EFFECTS_SURFACE
 from .volumetric import EFFECTS_3D
 
 TEST_EFFECTS = {"sweep": SweepTest, "status": StatusColors, "chase": Chase}
-LIBRARY: dict[str, type[Effect]] = {e.name: e for e in [*EFFECTS_3D, *EFFECTS_SURFACE, *EFFECTS_BASIC]}
+LIBRARY: dict[str, type[Effect]] = {e.name: e for e in [*EFFECTS_3D, *EFFECTS_SURFACE, *EFFECTS_GIFT, *EFFECTS_BASIC]}
 EFFECTS: dict[str, type[Effect]] = {**TEST_EFFECTS, **LIBRARY}
 PALETTE_IDS = set(GRADIENTS) | set(DYNAMIC)
 

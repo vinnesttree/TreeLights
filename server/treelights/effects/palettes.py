@@ -60,6 +60,8 @@ GRADIENTS: dict[str, tuple[str, list[Stop], bool]] = {
     "gold": ("Gold", [(0, "#4a2a00"), (100, "#c08000"), (170, "#ffd040"), (220, "#fff0b0"), (255, "#4a2a00")], True),
     "toxic": ("Toxic", [(0, "#002000"), (100, "#40ff00"), (170, "#c0ff00"), (255, "#002000")], True),
     "magenta_yellow": ("Magenta & Yellow", [(0, "#ff00a0"), (128, "#ff6040"), (200, "#ffe000"), (255, "#ff00a0")], True),
+    "vu": ("Level Meter", [(0, "#00d000"), (140, "#00ff00"), (190, "#ffe000"), (230, "#ff6000"), (255, "#ff0000")], False),
+    "valentine": ("Valentine", [(0, "#ff0030"), (100, "#ff2050"), (170, "#ff70b0"), (255, "#ff0030")], True),
     "midnight": ("Midnight", [(0, "#000010"), (100, "#100060"), (180, "#6000a0"), (255, "#000010")], True),
 }
 

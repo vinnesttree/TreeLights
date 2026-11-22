@@ -111,7 +111,7 @@ def test_params_parsing_and_palettes():
     ids = {p["id"] for p in catalogue()}
     assert ids == PALETTE_IDS and "default" in ids
     cats = {e["category"] for e in library()}
-    assert cats == {"3d", "surface", "basic"}
+    assert cats == {"3d", "surface", "gift", "basic"}
 
 
 @pytest.mark.timeout(60)
@@ -158,3 +158,36 @@ async def test_effects_api_start_live_update_and_stop(tmp_path):
         await task
         state.close() if hasattr(state, "close") else None
         pool.shutdown()
+
+
+def test_bouncing_balls_fall_bounce_lower_and_stay_inside():
+    from treelights.effects.gift import BouncingBalls
+
+    tree = TreeGeometry.from_map(tree_map())
+    eff = BouncingBalls({"intensity": 0})  # one ball
+    eff.setup(tree)
+    out = np.zeros((tree.n, 3))
+    heights, vys = [], []
+    for k in range(240):
+        eff.frame(k / 40, out)
+        if len(eff.balls):
+            heights.append(eff.balls[0, 1])
+            vys.append(eff.balls[0, 4])
+    h = np.array(heights)
+    # Apexes after each bounce (vy changes sign from + to -) get lower.
+    apex = [h[i] for i in range(1, len(vys)) if vys[i - 1] > 0 >= vys[i]]
+    assert len(apex) >= 2 and all(b < a for a, b in zip(apex, apex[1:]))
+    assert h.min() >= 0 and h[0] > 0.8
+
+
+def test_morse_spells_merry_xmas():
+    from treelights.effects.gift import MORSE, morse_timeline
+
+    runs = morse_timeline("MERRY XMAS")
+    letters: dict[int, str] = {}
+    for on, length, li in runs:
+        if on:
+            letters[li] = letters.get(li, "") + ("." if length == 1 else "-")
+    decode = {v: k for k, v in MORSE.items()}
+    assert "".join(decode[letters[i]] for i in sorted(letters)) == "MERRYXMAS"
+    assert any((not on) and length == 7 for on, length, _ in runs)  # the word gap
