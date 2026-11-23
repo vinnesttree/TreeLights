@@ -56,6 +56,12 @@ class WalkConfig:
     center_offset: float = 0.0  # path centred this fraction of the radius away from the tree's axis
     height_frac: float | None = None  # camera height within the lit part of the tree (0 bottom, 1 top); None: a bit above the middle
     height_var: float = 0.0  # slow raising/lowering of the phone, as a fraction of the tree's lit height
+    # Standing close: the lit part of the tree is `fill` times the frame height (None: it fits, at ~75%),
+    # so LEDs leave the picture. People then tilt the phone up and down to take in the whole tree:
+    # the aim point moves +-aim_var of the lit height, `aim_cycles` times per loop.
+    fill: float | None = None
+    aim_var: float = 0.0
+    aim_cycles: float = 3.0
     seed: int = 0
 
     @staticmethod
@@ -63,6 +69,14 @@ class WalkConfig:
         """A walk the way people actually walk: closer on one side, an oval, off-centre path,
         and the phone raised and lowered as they go."""
         base = dict(radius_var=0.2, ellipse=0.15, center_offset=0.2, height_var=0.25)
+        base.update(kw)
+        return WalkConfig(**base)
+
+    @staticmethod
+    def close(**kw) -> "WalkConfig":
+        """A small room: too close for the tree to fit in the picture, tilting the phone up and
+        down to take it all in, so LEDs keep leaving and re-entering the frame."""
+        base = dict(fill=1.7, aim_var=0.3, radius_var=0.1, height_var=0.1)
         base.update(kw)
         return WalkConfig(**base)
 
@@ -105,6 +119,8 @@ class Walker:
         vfov_half = np.arctan((scene.height / 2) / scene.intr.f)
         fit = (span / 2) / np.tan(0.75 * vfov_half) + 0.5 * tree.base_radius
         self.radius = max(cfg.radius_factor * tree.base_radius, fit)
+        if cfg.fill is not None:  # closer: the lit span is `fill` frame heights tall
+            self.radius = max((span / 2) / (cfg.fill * np.tan(vfov_half)) + tree.base_radius, 1.4 * tree.base_radius)
         self.target = np.array([0.0, lit_mid, 0.0])
         y0, y1 = float(tree.positions[:, 1].min()), float(tree.positions[:, 1].max())
         self.lit = (y0, y1)
@@ -144,7 +160,11 @@ class Walker:
         C = np.array([off[0] + r * np.cos(phi), h + bob, off[1] + r * np.sin(phi)])
         # People aim at the middle of what they see; with the tree near the frame's edge
         # they re-aim, so the camera looks at the tree's middle.
-        R, _ = look_at(C, self.target)
+        target = self.target
+        if c.aim_var:  # tilting the phone up and down to take in a tree that doesn't fit
+            target = target + np.array([0.0, c.aim_var * (self.lit[1] - self.lit[0])
+                                        * np.sin(c.aim_cycles * phi + self.path_phase[2]), 0.0])
+        R, _ = look_at(C, target)
         rv = np.zeros(3)
         if c.jitter_deg:
             rv += sum(np.radians(c.jitter_deg) / len(self.jit) * 2 * np.sin(2 * np.pi * f * t + p) * ax / np.linalg.norm(ax)
