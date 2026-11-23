@@ -55,6 +55,7 @@ class SourceResult:
     gyro: gyromod.GyroModel | None
     notes: list[str] = field(default_factory=list)
     gyro_cal: dict = field(default_factory=dict)  # calibration diagnostics, also when rejected
+    log_shift: float = 0.0  # seconds added to the orientation log's times to line it up with the frames
 
     @property
     def frame_t(self) -> np.ndarray:
@@ -93,6 +94,14 @@ def process_source(src: Source, n_leds: int, log_t: np.ndarray | None, log_q: np
     tracking = "image"
     model = gyro_model
     have_log = log_t is not None and log_q is not None and len(log_t) >= 10 and src.phone_t is not None
+    log_shift = 0.0
+    if have_log and _overlap(src.phone_t, log_t) < 0.5:
+        # The orientation log is on another clock than the frames (seen on a real phone: its
+        # sensor timestamps were 52.8 hours ahead of the camera's). Line it up by the motion.
+        log_shift = motion_log_offset(ts.rows, src.phone_t, log_t, log_q, src.width, src.height)
+        log_t = log_t + log_shift
+        notes.append(f"{src.name}: the orientation sensor's clock was {-log_shift:+.1f} s off the camera's; "
+                     "lined up by matching the phone's turning with the image motion.")
     if have_log and model is None:
         model = gyromod.calibrate(ts.rows, src.phone_t, log_t, log_q, src.width, src.height, f_prior)
         if not model.ok:
@@ -120,7 +129,60 @@ def process_source(src: Source, n_leds: int, log_t: np.ndarray | None, log_q: np
         ids = decode_tracks(ts, t, timing, n_leds)
     cal = {} if model is None else dict(model.info, ok=model.ok, f=round(model.f, 1), delta=round(model.delta, 3))
     cal["tracking"] = tracking
-    return SourceResult(src, timing, ts, ids, model if (model and model.ok) else None, notes, cal)
+    return SourceResult(src, timing, ts, ids, model if (model and model.ok) else None, notes, cal, log_shift)
+
+
+LOG_ALIGN_SEARCH_S = 5.0  # around lining up the starts of the log and the frames
+LOG_ALIGN_STEP_S = 0.05
+
+
+def _overlap(frame_t: np.ndarray, log_t: np.ndarray) -> float:
+    """Share of the frames' time span that the orientation log covers."""
+    a, b = float(np.min(frame_t)), float(np.max(frame_t))
+    lo, hi = max(a, float(log_t[0])), min(b, float(log_t[-1]))
+    return max(0.0, hi - lo) / max(b - a, 1e-9)
+
+
+def motion_log_offset(rows: np.ndarray, frame_t: np.ndarray, log_t: np.ndarray, log_q: np.ndarray,
+                      width: int, height: int) -> float:
+    """Seconds to add to the orientation log's times so that it lines up with the frames.
+
+    For frame pairs about half a second apart, the camera's rotation is found from the
+    images (essential matrices, as in the gyro calibration) and compared with the sensor's
+    rotation over the same interval read at each candidate offset. Only the angles are
+    compared, which doesn't depend on how the sensor's axes map onto the camera. Offsets
+    within LOG_ALIGN_SEARCH_S of lining up the starts (both start with the walk) are tried;
+    the gyro calibration then refines the best to within milliseconds (it searches +-0.1 s).
+    Falls back to lining up the starts."""
+    coarse = float(frame_t[0] - log_t[0])
+    span = float(np.ptp(frame_t))
+    pairs = gyromod.collect_long_pairs(rows, frame_t, gap_s=0.5, step_s=max(0.25, span / 200), min_common=15,
+                                       max_pairs=200)
+    size = max(width, height)
+    img = gyromod._image_rotations(pairs, 0.7 * size, (width - 1) / 2, (height - 1) / 2)
+    keep = [(a, b, gyromod._angle_deg(R)) for (a, b, _p, _q), R in zip(pairs, img) if R is not None]
+    if len(keep) < 10:
+        return coarse
+    ta = frame_t[[a for a, _b, _x in keep]]
+    tb = frame_t[[b for _a, b, _x in keep]]
+    th = np.array([x for _a, _b, x in keep])
+    q = np.asarray(log_q, float)
+    q = q / np.linalg.norm(q, axis=1, keepdims=True)
+    best, best_c = coarse, -np.inf
+    for lag in np.arange(-LOG_ALIGN_SEARCH_S, LOG_ALIGN_SEARCH_S + 1e-9, LOG_ALIGN_STEP_S):
+        off = coarse + lag
+        la, lb = ta - off, tb - off  # log times
+        inside = (la >= log_t[0]) & (lb <= log_t[-1])
+        if inside.sum() < 10:
+            continue
+        qa = gyromod.slerp_log(log_t, q, la[inside])
+        qb = gyromod.slerp_log(log_t, q, lb[inside])
+        sens = 2 * np.degrees(np.arccos(np.clip(np.abs((qa * qb).sum(1)), 0, 1)))
+        x = th[inside]
+        c = float(np.corrcoef(x, sens)[0, 1]) if x.std() > 1e-6 and sens.std() > 1e-6 else -np.inf
+        if c > best_c:
+            best, best_c = off, c
+    return best if best_c > 0.3 else coarse
 
 
 def _identified_rows(ts: TrackSet, ids: dict, timing: Timing, frame_t: np.ndarray) -> int:

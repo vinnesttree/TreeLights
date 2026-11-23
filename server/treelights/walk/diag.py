@@ -257,7 +257,10 @@ def run(data: Path, scan_id: str | None, vid: str | None, variants: list[str], u
         return
     log_t, log_q = load_motion(d)
     t0 = time.time()
-    cache = Path(f"/tmp/treelights-diag-{scan_id}-{vid}.pkl")
+    import hashlib
+
+    key = hashlib.sha1(f"{scan.root.resolve()}|{video.stat().st_size if video.exists() else 0}".encode()).hexdigest()[:10]
+    cache = Path(f"/tmp/treelights-diag-{scan_id}-{vid}-{key}.pkl")
     if use_cache and cache.exists():
         _say(f"Using the blobs detected before ({cache}; --no-cache detects again)")
         with open(cache, "rb") as fh:

@@ -553,6 +553,7 @@ The phone adds its own warning for turning too fast, and draws the coverage ring
    - The sensor's rotations are compared with them under every axis mapping and both quaternion conventions, over a grid of focal lengths.
    - The time offset between sensor and frames is refined on 0.5 s pairs, where hand jitter makes it visible.
    - The sensor is used only if the best mapping's error is under 3°, it beats every non-equivalent mapping by 1.5×, and it beats "no rotation" by 2.5×.
+   - **Sensor clock.** Some phones stamp orientation readings on another clock than the camera frames; one real walk's motion log was 52.8 hours ahead, and the gyro was never used. The phone page now moves such readings onto the page clock, keeping their spacing. For walks already recorded, the server lines the log up when it doesn't overlap the frames. It compares the camera's rotation between frames 0.5 s apart, found from the images, with the sensor's rotation angle at offsets within ±5 s of the walk's start; this angle doesn't depend on the axis mapping. The calibration then refines the offset as usual.
 5. **Tracking with the gyro:** each frame's predicted motion is the rotation homography `K·ΔR·K⁻¹` plus the shift voted from the LEDs. The result is kept only if it identifies more detections than tracking without it.
 6. **Decoding** (`walk/decode.py`):
    1. Per track and per cycle, each bit gets a vote: which of its two slots was brighter, and by how much.

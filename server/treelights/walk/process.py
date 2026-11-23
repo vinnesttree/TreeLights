@@ -43,6 +43,8 @@ def analyze(n: int, live: tuple[list[Frame], int, int] | None, video: tuple[list
         live_res = process_source(Source("live", frames, w, h, np.array([f.t for f in frames])), n, log_t, log_q)
         results.append(live_res)
         notes += live_res.notes
+        if live_res.log_shift and log_t is not None:
+            log_t = log_t + live_res.log_shift  # the recording then reads the log lined up
     if video and video[0]:
         frames, w, h = video
         frames.sort(key=lambda f: f.t)

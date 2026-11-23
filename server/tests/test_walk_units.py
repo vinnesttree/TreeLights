@@ -232,3 +232,36 @@ def test_tree_axis_from_the_led_outline_when_walking():
     thin = P[np.cos(az - 1.0) < 0.4]
     assert np.hypot(*outline_axis_xz(thin)) < 0.15 * 46
     assert np.hypot(*np.median(thin[:, [0, 2]], axis=0)) > 2 * np.hypot(*outline_axis_xz(thin))
+
+
+def test_motion_log_on_another_clock_is_lined_up():
+    """A phone stamped its orientation readings on another clock than its camera frames
+    (52.8 hours ahead), so the gyro couldn't be used. The log is lined up by comparing the
+    camera's rotation between frames (from the images) with the sensor's, to well within
+    the gyro calibration's own +-0.1 s search."""
+    from treelights.reconstruction.camera import rodrigues
+    from treelights.walk.pipeline import motion_log_offset
+
+    rng = np.random.default_rng(4)
+    X = rng.uniform([-60, -60, 250], [660, 60, 450], (120, 3))  # LEDs in front of the camera's path
+    f, w, h = 700.0, 960, 540
+    T = np.arange(0, 40, 1 / 30)
+    # Irregular turning: a slow sweep plus hand jitter at a few Hz.
+    yaw = 0.15 * np.sin(0.4 * T) + 0.02 * np.sin(7.0 * T) + 0.01 * np.sin(11.0 * T)
+    pitch = 0.05 * np.sin(0.7 * T) + 0.015 * np.sin(5.0 * T)
+    Rs = [rodrigues(np.array([p, y, 0.0])) for y, p in zip(yaw, pitch)]
+    rows = []
+    for fi, R in enumerate(Rs):
+        C = np.array([15 * T[fi], 2 * np.sin(0.5 * T[fi]), 0.0])  # walking sideways (the images need parallax)
+        Xc = (X - C) @ R.T
+        uv = Xc[:, :2] / Xc[:, 2:3] * f + [(w - 1) / 2, (h - 1) / 2] + rng.normal(0, 0.3, (len(X), 2))
+        for i, (x, y) in enumerate(uv):
+            rows.append((i, fi, x, y, 100.0, 0.8, 0.0))
+    rows = np.array(rows)
+    frame_t = 1795397020.0 + T
+    log_t = np.arange(-0.6, 40.3, 1 / 60)  # the sensor started 0.6 s before the camera
+    yl, pl = np.interp(log_t, T, yaw), np.interp(log_t, T, pitch)
+    log_q = np.array([gyro.R_to_quat(rodrigues(np.array([p, y, 0.0]))) for y, p in zip(yl, pl)])
+    log_t = log_t + 1795397020.0 + 190252.2  # on another clock
+    off = motion_log_offset(rows, frame_t, log_t, log_q, w, h)
+    assert abs(off - (-190252.2)) < 0.06

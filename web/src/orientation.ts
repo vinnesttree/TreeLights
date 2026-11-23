@@ -8,7 +8,9 @@
 // nothing here depends on the platform's conventions being what the spec says.
 //
 // Times are phone-clock seconds: (performance.timeOrigin + timestamp) / 1000, the
-// same clock as the frame times and the recording start.
+// same clock as the frame times and the recording start. Some phones stamp sensor
+// readings on another clock (one was 52.8 hours ahead): those are moved onto the
+// page's clock (see Orientation.stamp).
 
 export type Quat = [number, number, number, number]; // x, y, z, w
 
@@ -57,10 +59,26 @@ export class Orientation {
   /** Angular speed (deg/s), smoothed. */
   rate = 0;
   private sensor: any = null;
+  /** Seconds to add to the platform's timestamps when they're on another clock (null: they aren't). */
+  private clockFix: number | null = null;
   private onEvent = (e: DeviceOrientationEvent) => {
     if (e.alpha === null || e.beta === null || e.gamma === null) return;
-    this.push(phoneTime(e.timeStamp), eulerToQuat(e.alpha, e.beta, e.gamma));
+    this.push(this.stamp(e.timeStamp), eulerToQuat(e.alpha, e.beta, e.gamma));
   };
+
+  /**
+   * A reading's time on the page clock. A reading arrives a few ms after it was taken, so
+   * its timestamp is normally just behind phoneNow(). When it is more than a second off,
+   * the platform uses another clock: the offset is then the smallest (now - stamp) seen so
+   * far, the reading that arrived quickest, which keeps the readings' own spacing.
+   */
+  private stamp(domTs: number): number {
+    const raw = phoneTime(domTs);
+    const lag = phoneNow() - raw;
+    if (this.clockFix === null && Math.abs(lag) <= 1) return raw;
+    this.clockFix = this.clockFix === null ? lag : Math.min(this.clockFix, lag);
+    return raw + this.clockFix;
+  }
 
   async start(): Promise<string> {
     const w = window as any;
@@ -86,7 +104,7 @@ export class Orientation {
         });
         s.addEventListener("reading", () => {
           const q = s.quaternion as number[];
-          if (q) this.push(phoneTime(s.timestamp), [q[0], q[1], q[2], q[3]]);
+          if (q) this.push(this.stamp(s.timestamp), [q[0], q[1], q[2], q[3]]);
         });
         this.sensor = s;
         this.source = "sensor";
