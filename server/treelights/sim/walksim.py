@@ -62,7 +62,6 @@ class WalkConfig:
     fill: float | None = None
     aim_var: float = 0.0
     aim_cycles: float = 3.0
-    led_radius_cm: float = 0.0  # apparent bulb radius (see Scene); 0: the old fixed small spot
     seed: int = 0
 
     @staticmethod
@@ -194,7 +193,7 @@ def simulate(tree: SynthTree, cfg: WalkConfig, faults: Faults, out_video: str | 
     rng = np.random.default_rng(cfg.seed)
     f = f_px or 0.78 * width
     scene = Scene(tree, width=width, height=height, intr=Intrinsics(f, (width - 1) / 2, (height - 1) / 2, -0.03, 0.0),
-                  faults=faults, seed=cfg.seed, led_radius_cm=cfg.led_radius_cm)
+                  faults=faults, seed=cfg.seed)
     walker = Walker(tree, cfg, scene)
     pattern = WalkPattern(tree.n, cfg.pattern_level)
     phone0 = 1000.0  # phone clock at scene time 0

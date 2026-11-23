@@ -19,7 +19,7 @@ from scipy.spatial import cKDTree
 
 from .blobs import FLUX, SAT, SHARP, X, Y
 
-GATE_PX = 8.0  # 5 px lost close-up LEDs (big, saturated blobs jitter more; parallax): 49 vs 69 of 150 decoded
+GATE_PX = 5.0
 VOTE_GATE_GYRO = 25.0
 VOTE_GATE_NOGYRO = 70.0
 MAX_COAST_S = 0.6
@@ -101,52 +101,6 @@ def _vote_shift(pred: np.ndarray, blobs: np.ndarray, gate: float) -> tuple[np.nd
     return d[near].mean(axis=0), int(near.sum())
 
 
-LOCAL_GATE_PX = 2 * GATE_PX  # a confident match: mutual nearest, within this, no close second blob
-LOCAL_RATIO = 2.0  # the second-nearest blob is at least this much further than the nearest
-LOCAL_K = 6
-LOCAL_R_PX = 120.0
-LOCAL_MIN = 3
-
-
-def _local_field(pred: np.ndarray, blobs: np.ndarray):
-    """The motion the shared shift left over, around each point: a function giving, for
-    query points, the median residual of the K nearest confidently matched predictions
-    (None when too few). Confident means mutual nearest neighbours, within LOCAL_GATE_PX,
-    with no second blob nearly as close, so a swap can't steer the field."""
-    if len(pred) < LOCAL_MIN or len(blobs) < 2:
-        return None
-    tb = cKDTree(blobs)
-    d, j = tb.query(pred, k=2, distance_upper_bound=LOCAL_GATE_PX * LOCAL_RATIO)
-    d1, j1 = d[:, 0], j[:, 0]
-    ok = np.isfinite(d1) & (d1 <= LOCAL_GATE_PX) & (d[:, 1] >= LOCAL_RATIO * np.maximum(d1, 1.0))
-    if ok.sum() < LOCAL_MIN:
-        return None
-    back = cKDTree(pred).query(blobs[j1[ok]])[1]
-    idx = np.nonzero(ok)[0]
-    mutual = back == idx
-    idx = idx[mutual]
-    if len(idx) < LOCAL_MIN:
-        return None
-    anchors = pred[idx]
-    resid = blobs[j1[idx]] - anchors
-    ta = cKDTree(anchors)
-    k = min(LOCAL_K, len(idx))
-
-    def at(q: np.ndarray) -> np.ndarray:
-        if len(q) == 0:
-            return np.zeros((0, 2))
-        _dd, jj = ta.query(q, k=k, distance_upper_bound=LOCAL_R_PX)  # k >= LOCAL_MIN: 2-D results
-        ext = np.vstack([resid, np.full((1, 2), np.nan)])  # missing neighbours index past the end
-        R = ext[jj]  # (len(q), k, 2)
-        enough = np.isfinite(R[..., 0]).sum(axis=1) >= LOCAL_MIN
-        out = np.zeros((len(q), 2))
-        if enough.any():
-            out[enough] = np.nanmedian(R[enough], axis=1)
-        return out
-
-    return at
-
-
 def _greedy_match(pred: np.ndarray, pts: np.ndarray, gate: np.ndarray | float) -> tuple[np.ndarray, np.ndarray]:
     """One-to-one nearest matching within a gate (scalar or per prediction)."""
     mt = np.full(len(pred), -1)
@@ -217,16 +171,6 @@ def track(frames: list[Frame], K: np.ndarray | None = None, use_gyro: bool = Tru
             else:
                 lock = 0
             shifts[fi] = expected + (s if votes >= 3 else 0)
-        if len(pred) and len(bxy):
-            # Local motion: LEDs at different depths move differently (parallax), most of
-            # all close to the tree, and a single global shift then leaves neighbours
-            # within the gate of each other's blobs and tracks swap LEDs. Correct every
-            # prediction by how the confidently matched tracks around it moved.
-            field_ = _local_field(pred, bxy)
-            if field_ is not None:
-                pred = pred + field_(pred)
-                if len(lpred):
-                    lpred = lpred + field_(lpred)
         mt, mb = _greedy_match(pred, bxy, GATE_PX)
         m = mt >= 0
         if m.any():
@@ -284,87 +228,3 @@ def track(frames: list[Frame], K: np.ndarray | None = None, use_gyro: bool = Tru
         prev = fr
     arr = np.array(rows, float) if rows else np.zeros((0, 7))
     return TrackSet(arr, next_id, shifts)
-
-
-STITCH_MAX_GAP_S = 1.0  # a piece may continue another after at most this gap
-STITCH_PX = 6.0  # allowed mismatch where the two pieces meet...
-STITCH_PX_PER_S = 15.0  # ...growing with the gap
-_VEL_ROWS = 6
-
-
-def _piece_ends(rows: np.ndarray, frame_t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """(t, x, y, vx, vy) at the start and at the end of a track piece."""
-    t = frame_t[rows[:, 1].astype(int)]
-
-    def vel(a: int, b: int) -> np.ndarray:
-        dt = float(t[b] - t[a])
-        return (rows[b, 2:4] - rows[a, 2:4]) / dt if dt > 1e-6 else np.zeros(2)
-
-    m = len(rows) - 1
-    vh = vel(0, min(_VEL_ROWS, m))
-    vt = vel(max(0, m - _VEL_ROWS), m)
-    return np.array([t[0], rows[0, 2], rows[0, 3], vh[0], vh[1]]), np.array([t[-1], rows[-1, 2], rows[-1, 3], vt[0], vt[1]])
-
-
-def stitch(ts: TrackSet, frame_t: np.ndarray) -> TrackSet:
-    """Join track pieces that continue each other into one track.
-
-    Close to the tree an LED's track breaks into many short pieces: big blobs merge with
-    their neighbours for a frame or two, parallax, a slot too dim to see. Only a track that
-    covers a whole 7.2 s cycle can be decoded, so pieces are joined when one starts shortly
-    after another ended, where both were heading (each extrapolated from its own velocity to
-    the middle of the gap). Each piece gets at most one successor and one predecessor, best
-    matches first. A wrong join is harmless: the decoder splits tracks where their bit votes
-    start to contradict, as for any track that swapped LEDs."""
-    by = ts.by_track()
-    if len(by) < 2:
-        return ts
-    tids = np.array(list(by))
-    S = np.zeros((len(tids), 5))
-    E = np.zeros((len(tids), 5))
-    for k, tid in enumerate(tids):
-        S[k], E[k] = _piece_ends(by[int(tid)], frame_t)
-    order = np.argsort(S[:, 0])
-    S_sorted = S[order]
-    pairs = []  # (cost, a, b)
-    for a in range(len(tids)):
-        te = E[a, 0]
-        lo, hi = np.searchsorted(S_sorted[:, 0], [te, te + STITCH_MAX_GAP_S], side="right")
-        if hi <= lo:
-            continue
-        bs = order[lo:hi]
-        gap = S[bs, 0] - te
-        half = gap[:, None] / 2
-        pa = E[a, 1:3] + E[a, 3:5] * half
-        pb = S[bs, 1:3] - S[bs, 3:5] * half
-        d = np.hypot(*(pa - pb).T)
-        gate = STITCH_PX + STITCH_PX_PER_S * gap
-        ok = (d <= gate) & (bs != a)
-        for b, c in zip(bs[ok], (d[ok] / gate[ok]) + 0.5 * gap[ok] / STITCH_MAX_GAP_S):
-            pairs.append((float(c), a, int(b)))
-    if not pairs:
-        return ts
-    pairs.sort()
-    nxt = np.full(len(tids), -1)
-    prv = np.full(len(tids), -1)
-    for _c, a, b in pairs:
-        if nxt[a] < 0 and prv[b] < 0:
-            nxt[a], prv[b] = b, a
-    chain = np.full(len(tids), -1)
-    cid = 0
-    for k in range(len(tids)):
-        if prv[k] >= 0 or chain[k] >= 0:
-            continue
-        j = k
-        while j >= 0 and chain[j] < 0:
-            chain[j] = cid
-            j = nxt[j]
-        cid += 1
-    for k in range(len(tids)):  # cycles can't form (time only moves forward); any leftover gets its own
-        if chain[k] < 0:
-            chain[k] = cid
-            cid += 1
-    remap = dict(zip(tids.tolist(), chain.tolist()))
-    rows = ts.rows.copy()
-    rows[:, 0] = [remap[int(t)] for t in rows[:, 0]]  # rows stay in frame order
-    return TrackSet(rows, cid, ts.shifts)

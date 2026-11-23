@@ -141,14 +141,7 @@ Walking around the tree changes almost every assumption the tripod design relied
 **Residual risks of walking:**
 - **A tree against a wall can't be walked around.** A partial walk still maps the side that was seen. The rest is filled from the wiring and labelled `estimated`, or the tripod mode is used.
 - **Turning the phone between portrait and landscape mid-walk** changes the sensor-to-camera mapping. The page locks the orientation in fullscreen where Chrome allows it, and asks you to hold the phone upright.
-- **Rooms too small to step back.**
-  - LEDs leave the picture, and the user tilts the phone up and down to take in the whole tree. The phone reminds them to tilt slowly.
-  - LEDs that leave the picture are tracked again when they return (within 2 s). An LED is identified once it has been in view for about one pattern cycle (7.2 s).
-  - Up close, every LED covers many pixels, and LEDs at different depths move differently across the picture. So:
-    - Point sources are told from scattered light relative to the frame's typical LED size (below).
-    - Tracking corrects each prediction by its neighbours' motion.
-  - Simulated walks (`WalkConfig.close()`, with `led_radius_cm` for realistic LED sizes) test this.
-  - **Limit:** very close and tilting, LEDs merge with their neighbours in the picture, and light scattered on branches is strong. A simulated walk with the tree 1.2× the frame height, realistic LED sizes and gentle tilting placed only 13 of 49 cameras and measured about a third of the LEDs, with errors of several percent. Standing back so most of the tree fits works far better.
+- **Rooms too small to step back** leave LEDs at the edge of the picture. The phone warns, and LEDs that leave the picture are tracked again when they return.
 
 ### Residual risks of this design
 
@@ -306,7 +299,7 @@ Chrome only allows camera access on secure (HTTPS) pages. The setup works like t
 
 1. **Setup:** pick the WLED controller, run the checks, enter the tree height.
 2. **Scan (draft 4, the default).** Open the Scan page on the phone and walk once around the tree with the camera running (§7.9):
-   1. Dim the room, and stand far enough back that the whole tree fits in the picture if the room allows. Otherwise, tilt slowly up and down while walking (§3, small rooms).
+   1. Dim the room, and stand far enough back that the whole tree fits in the picture.
    2. Tap **Start**. Every LED starts blinking its own index. The camera locks exposure and focus, recording starts, and frames stream to the server.
    3. Walk slowly once around the tree, about a minute, keeping the tree in the middle of the picture. A ring on the screen fills in as each side is covered and turns green once enough LEDs there are identified. Warnings appear for turning too fast, LEDs out of the picture, or the pattern not being found.
    4. Back at the start, tap **Stop**. The recording uploads, and the server decodes it together with the live frames and builds the map.
@@ -555,10 +548,6 @@ The phone adds its own warning for turning too fast, and draws the coverage ring
    - **Live feedback** keeps the last good timing and reuses it when a window can't be timed on its own; the pattern's phase doesn't drift.
    - **Detrending:** before that, brightness is divided by a running median over ±1.5 s. Code slots are 32 of the 36, so the median follows the code level, and with it how much brighter the LEDs look as you walk closer or further. Simulated walks whose distance varied from 140 to 264 cm changed it 20×; without detrending their timing fit sat at the acceptance limit, or failed.
 3. **Tracking, without the gyro:** blobs are associated frame to frame after a voted global shift. Tracks coast through the sync "off" slot and short occlusions. A lost track can be picked up again for up to 2 s.
-   - **Local motion:** confident matches (mutual nearest, no close second blob) give a residual motion field; every prediction is corrected by the median residual of its 6 nearest confident neighbours. Up close, LEDs at different depths move differently (parallax), and with one global shift neighbouring tracks swapped LEDs.
-   - **Gate:** 8 px. Big, saturated LEDs (close up, high resolution) jitter more; with 5 px a simulated close walk decoded 49 of 150 LEDs instead of 69.
-   - **Brightness** for decoding is measured over the whole 9×9 window: a saturated LED differs between bright and dim mostly in its extent.
-   - **Stitching:** pieces of a track that continue each other (one starts within 1 s of another's end, where both were heading) are joined into one track before decoding. Up close, an LED's track breaks into many short pieces, and only a track covering a whole cycle decodes. A wrong join only makes the decoder split the track where its votes contradict.
 4. **Gyro self-calibration** (`walk/gyro.py`):
    - Rotations between frames about 3 s apart (falling back to 2 s, then 1 s) are recovered from the tracked LEDs with essential matrices.
    - The sensor's rotations are compared with them under every axis mapping and both quaternion conventions, over a grid of focal lengths.
@@ -576,7 +565,6 @@ The phone adds its own warning for turning too fast, and draws the coverage ring
 **Fusion and solving.**
 - **Common timeline.** The recording's frames get phone-clock times through the pattern's timeline, which both sources share. So the orientation log can be read for every video frame.
 - **Keyframes.** Up to 48 keyframes are chosen across both sources, one per time window. Each is scored by the number of LEDs identified, their sharpness and the turning rate.
-- **Point or scattered light** is judged per keyframe, against the median size of that frame's identified LEDs: a blob counts as a point source if its core is at most about twice the typical LED's, but only when the fixed size (a core of about 24 px) would call most of the frame's LEDs scattered light; otherwise the fixed size is kept, since it separates glows on branches better. With a fixed size in pixels (draft 4 at first), LEDs close to the camera or seen at high resolution were all taken for scattered light. The camera solve then had almost nothing to work with: a simulated walk with realistic LED sizes failed outright. This is the likely cause of a real walk that identified about 95% of the LEDs live, then measured about 5% in the map.
 - **Solving.** Each keyframe becomes a segment for the existing solver (§9): its own camera, the gyro's "up" in that camera, and a focal-length prior from the gyro calibration. From there the solve is the same as for tripod views: robust bundle adjustment, hypotheses, chain selection with dynamic bounds, filling.
 - **Re-solving.** Keyframe observations are stored with the scan (§13), so a re-solve after editing overrides doesn't decode again.
 

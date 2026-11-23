@@ -17,8 +17,7 @@ BG_SIGMA = 7.0
 K_SIGMA = 6.0
 FLOOR = 8.0
 MAX_BLOBS = 3000
-FLUX_R = 4  # the whole 9x9 window: a big, saturated LED (close up, high resolution) differs between bright
-# and dim mostly in its extent, which a 5x5 core misses (100 vs 120 of 150 decoded in simulation)
+FLUX_R = 2
 
 # Columns of a blob array.
 X, Y, FLUX, PEAK, SHARP, SAT = range(6)

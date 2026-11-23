@@ -69,9 +69,9 @@ docker compose -f docker/docker-compose.yml logs treelights   # shows the URL an
    - Enter the **tree height in cm, from the lowest light to the highest light**. It only sets the map's units.
    - Optionally run *Index chase* to confirm the whole string lights.
 2. **Scan.** Open the **Scan** page on the phone.
-   1. Dim the room. Stand far enough back that the whole tree fits in the picture if you can. In a small room it's fine if part of the tree is out of the picture: tilt the phone slowly up and down as you walk so every part is in view for several seconds (each LED needs about 8 s in view to be identified).
+   1. Dim the room. Stand far enough back that the whole tree fits in the picture.
    2. Tap *Start* and allow the camera and motion sensors. All LEDs start blinking.
-   3. Walk slowly, at an even pace, once around the tree (about a minute), holding the phone upright with the tree in the middle of the picture. The ring fills in as you go and turns green where enough LEDs were identified. Heed the warnings: *slow down*, *point at the tree*. *Part of the tree is out of the picture* is only a reminder to tilt slowly.
+   3. Walk slowly, at an even pace, once around the tree (about a minute), holding the phone upright with the tree in the middle of the picture. The ring fills in as you go and turns green where enough LEDs were identified. Heed the warnings: *slow down*, *step back*, *point at the tree*.
    4. Back at the start, tap *Stop*. The recording uploads (it resumes if interrupted) and the map is built from the recording together with the frames streamed live.
 3. **Map.** Review the 3D map and its quality report.
    - Tap an LED to blink it on the real tree.
