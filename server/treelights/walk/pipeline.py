@@ -24,12 +24,17 @@ from .blobs import FLUX
 from .decode import Identity, decode_tracks, identity_at
 from .pattern import CYCLE_T
 from .timing import Timing, estimate
-from .tracking import Frame, TrackSet, track
+from .tracking import Frame, TrackSet, stitch, track
 
 MAX_KEYFRAMES = 48
 MIN_KEYFRAME_GAP_S = 0.8
 MIN_IDENTIFIED = 10
 MAX_RATE_DEG_S = 45.0
+POINT_SHARP = 0.5  # sharpness = sqrt(6 / core area): below this, a blob counts as scattered light
+# Experimental, off by default (walk/diag.py switches them on to compare on real walks):
+POINT_RELATIVE = False  # when LEDs are big, judge against the frame's typical LED instead...
+POINT_REL = 0.7  # ...: a point's core is at most ~2x the typical LED's
+STITCH = False  # join track pieces that continue each other before decoding
 
 
 @dataclass
@@ -83,6 +88,8 @@ def process_source(src: Source, n_leds: int, log_t: np.ndarray | None, log_q: np
     if not timing.ok:
         notes.append(f"{src.name}: the LED pattern wasn't found in the frames.")
     ts = track(frames, None, use_gyro=False)
+    if STITCH:
+        ts = stitch(ts, t)
     tracking = "image"
     model = gyro_model
     have_log = log_t is not None and log_q is not None and len(log_t) >= 10 and src.phone_t is not None
@@ -99,6 +106,8 @@ def process_source(src: Source, n_leds: int, log_t: np.ndarray | None, log_q: np
         f_px = model.f * scale
         K = np.array([[f_px, 0, (src.width - 1) / 2], [0, f_px, (src.height - 1) / 2], [0, 0, 1.0]])
         ts_g = track(frames, K, use_gyro=True)
+        if STITCH:
+            ts_g = stitch(ts_g, t)
         ids_g = decode_tracks(ts_g, t, timing, n_leds)
         ids = decode_tracks(ts, t, timing, n_leds)
         # The gyro's prediction helps most with hand jitter at full frame rate; with
@@ -211,13 +220,23 @@ def build_observations(results: list[SourceResult]) -> tuple[dict, dict, dict]:
         per: dict[int, list[tuple]] = {}
         for led, x, y, fl, sh in dets[name][fi]:
             per.setdefault(led, []).append((x, y, fl, sh))
+        # Point or diffuse: a blob whose core covers more than ~24 px is scattered light. But
+        # close up, or with a high-resolution camera, every LED covers that much, and with the
+        # fixed size most direct views of LEDs were taken for scattered light: too few were
+        # left to place the cameras (a simulated walk with realistic LED sizes failed outright).
+        # When the fixed size calls most of a frame's LEDs diffuse, judge against the frame's
+        # typical LED instead. Otherwise keep it: then it separates glows on branches better.
+        best = [max(z[3] for z in lst) for lst in per.values()]
+        thr = POINT_SHARP
+        if POINT_RELATIVE and best and np.mean(np.array(best) >= POINT_SHARP) < 0.5:
+            thr = POINT_REL * float(np.median(best))
         o = {}
         for led, lst in per.items():
             lst.sort(key=lambda z: -z[2])
             top = max(lst[0][2], 1e-6)
             cl = []
             for x, y, fl, sh in lst[:3]:
-                point = sh >= 0.5
+                point = sh >= thr
                 cl.append({"x": float(x), "y": float(y), "score": float(fl / top), "snr": 30.0,
                            "kind": "point" if point else "diffuse",
                            "sigma_px": round(0.4 / max(sh, 0.3), 2) if point else round(max(2.0, float(np.sqrt(6.0 / max(sh, 0.05) ** 2 / np.pi))), 2)})
