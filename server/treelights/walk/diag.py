@@ -6,6 +6,10 @@ Run inside the container (Dockge: the stack's terminal, "bash"):
     python -m treelights.walk.diag <scan> <view>    # a given one
     python -m treelights.walk.diag --variants base,point
 
+Progress is printed as it goes, each line with the time since the start. The detected
+blobs are cached in /tmp inside the container (not in your data), so running it again
+for the same walk skips the slow detection; --no-cache detects again.
+
 The walk's live frames and recording are decoded once; then each variant runs the
 rest of the pipeline and the solve, and a short report per stage is printed: is the
 pattern found, how many LEDs are decoded, how many are identified per keyframe, how
@@ -26,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import pickle
 import sys
 import time
 from pathlib import Path
@@ -33,7 +38,9 @@ from pathlib import Path
 import numpy as np
 
 from . import blobs as B
+from . import gyro as GY
 from . import pipeline as PL
+from . import process as PR
 from . import tracking as TR
 from .job import _live_images, _video_images, load_motion
 from .process import analyze
@@ -50,8 +57,80 @@ VARIANTS = {
 }
 
 
+_T0 = time.time()
+
+
 def _say(*a) -> None:
-    print(*a, flush=True)
+    e = int(time.time() - _T0)
+    print(f"[{e // 60:3d}:{e % 60:02d}]", *a, flush=True)
+
+
+class _Progress(list):
+    """A frame list that reports how far a pass over it has got (every 10%)."""
+
+    def __init__(self, items, label: str):
+        super().__init__(items)
+        self.label = label
+
+    def __iter__(self):
+        n = len(self)
+        step = max(1, n // 10)
+        t = time.time()
+        for i, x in enumerate(super().__iter__()):
+            if i and i % step == 0:
+                left = (time.time() - t) / i * (n - i)
+                _say(f"      {self.label}: {100 * i // n}% ({i}/{n} frames, about {left / 60:.1f} min left)")
+            yield x
+
+
+def _hook_progress() -> None:
+    """Report each stage of the pipeline as it runs (wrapping the functions it calls)."""
+    src = {"name": "?"}
+    orig_ps, orig_track, orig_est = PL.process_source, PL.track, PL.estimate
+    orig_dec, orig_cal, orig_stitch = PL.decode_tracks, GY.calibrate, PL.stitch
+
+    def process_source(s, *a, **k):
+        src["name"] = s.name
+        _say(f"    {s.name}: {len(s.frames)} frames")
+        return orig_ps(s, *a, **k)
+
+    def estimate(*a, **k):
+        t = time.time()
+        r = orig_est(*a, **k)
+        _say(f"    {src['name']}: pattern timing {'found' if r.ok else 'NOT found'} ({time.time() - t:.0f} s)")
+        return r
+
+    def track(frames, K=None, use_gyro=True):
+        how = "with the gyro" if use_gyro and K is not None else "without the gyro"
+        _say(f"    {src['name']}: tracking {how}...")
+        t = time.time()
+        r = orig_track(_Progress(frames, f"tracking {src['name']} ({how})"), K, use_gyro)
+        _say(f"    {src['name']}: tracking {how} done: {r.n_tracks} tracks ({time.time() - t:.0f} s)")
+        return r
+
+    def stitch(ts, t_):
+        t = time.time()
+        r = orig_stitch(ts, t_)
+        _say(f"    {src['name']}: stitching: {ts.n_tracks} -> {r.n_tracks} tracks ({time.time() - t:.0f} s)")
+        return r
+
+    def calibrate(*a, **k):
+        _say(f"    {src['name']}: calibrating the gyro...")
+        t = time.time()
+        r = orig_cal(*a, **k)
+        _say(f"    {src['name']}: gyro {'calibrated' if r.ok else 'rejected'} ({time.time() - t:.0f} s)")
+        return r
+
+    def decode_tracks(ts, *a, **k):
+        t = time.time()
+        r = orig_dec(ts, *a, **k)
+        leds = len({i.index for lst in r.values() for i in lst})
+        _say(f"    {src['name']}: decoded {leds} LEDs from {ts.n_tracks} tracks ({time.time() - t:.0f} s)")
+        return r
+
+    PL.process_source, PL.estimate, PL.track, PL.stitch = process_source, estimate, track, stitch
+    PL.decode_tracks, GY.calibrate = decode_tracks, calibrate
+    PR.process_source = process_source  # process.analyze calls it by its own imported name
 
 
 def _detect(images) -> tuple[list[tuple[float, np.ndarray]], int, int]:
@@ -69,7 +148,10 @@ def _detect(images) -> tuple[list[tuple[float, np.ndarray]], int, int]:
     B.measure_all = both
     try:
         out, w, h = [], 0, 0
-        for t, img in images:
+        t0 = time.time()
+        for k, (t, img) in enumerate(images):
+            if k and k % 1000 == 0:
+                _say(f"      {k} frames ({k / (time.time() - t0):.1f} frames/s)")
             h, w = img.shape[:2]
             b = B.detect_blobs(img)
             if b.shape[1] == 6:  # no peaks: an empty (0, 6) array
@@ -104,7 +186,7 @@ def _blob_stats(name: str, det) -> None:
              f"{np.median(sh[bright]):.2f}, share >= 0.5 (counted as points by default) {np.mean(sh[bright] >= 0.5):.0%}")
 
 
-def run(data: Path, scan_id: str | None, vid: str | None, variants: list[str]) -> None:
+def run(data: Path, scan_id: str | None, vid: str | None, variants: list[str], use_cache: bool = True) -> None:
     from ..capture.store import ScanStore
     from ..config import ConfigStore
     from ..reconstruction import sfm
@@ -135,14 +217,27 @@ def run(data: Path, scan_id: str | None, vid: str | None, variants: list[str]) -
          f"{video.stat().st_size / 1e6:.0f} MB" if video.exists() else f"Walk {scan_id}/{vid}: {n} LEDs, no recording")
     log_t, log_q = load_motion(d)
     t0 = time.time()
-    _say("Detecting blobs in the live frames...")
-    live = _detect(_live_images(d)) if (d / "live.jsonl").exists() else ([], 0, 0)
-    _say("Detecting blobs in the recording (this takes a while)...")
-    vid_det = _detect(_video_images(video)) if video.exists() and video.stat().st_size > 0 else ([], 0, 0)
+    cache = Path(f"/tmp/treelights-diag-{scan_id}-{vid}.pkl")
+    if use_cache and cache.exists():
+        _say(f"Using the blobs detected before ({cache}; --no-cache detects again)")
+        with open(cache, "rb") as fh:
+            live, vid_det = pickle.load(fh)
+    else:
+        _say("Detecting blobs in the live frames...")
+        live = _detect(_live_images(d)) if (d / "live.jsonl").exists() else ([], 0, 0)
+        _say("Detecting blobs in the recording (this takes a while)...")
+        vid_det = _detect(_video_images(video)) if video.exists() and video.stat().st_size > 0 else ([], 0, 0)
+        if use_cache:
+            try:
+                with open(cache, "wb") as fh:
+                    pickle.dump((live, vid_det), fh)
+            except OSError as e:
+                _say(f"  (couldn't cache the blobs: {e})")
     _say(f"  done in {time.time() - t0:.0f} s; live {live[1]}x{live[2]}, recording {vid_det[1]}x{vid_det[2]}")
     _blob_stats("live", live[0])
     _blob_stats("recording", vid_det[0])
     overrides = scan.overrides()
+    _hook_progress()
     for name in variants:
         opts = VARIANTS[name]
         _apply(opts)
@@ -150,6 +245,7 @@ def run(data: Path, scan_id: str | None, vid: str | None, variants: list[str]) -
         _say(f"\n=== {name} ===")
         lv = (_frames(live[0], "flux" in opts), live[1], live[2]) if live[0] else None
         vv = (_frames(vid_det[0], "flux" in opts), vid_det[1], vid_det[2]) if vid_det[0] else None
+        _say("  decoding...")
         try:
             wr = analyze(n, lv, vv, log_t, log_q, view.get("rec_start"))
         except Exception as e:  # noqa: BLE001
@@ -170,9 +266,10 @@ def run(data: Path, scan_id: str | None, vid: str | None, variants: list[str]) -
         if not obs:
             continue
         segs = {s: dict(m, view=vid) for s, m in wr.segments.items()}
+        _say("  solving...")
         try:
             m = solve(SolveInput(n, obs, segs, height, list(scan.meta.get("output_breaks", [])), overrides, None,
-                                 wr.info.get("focal_prior"), scan_id, None))
+                                 wr.info.get("focal_prior"), scan_id, None), progress=lambda msg: _say(f"    {msg}"))
         except Exception as e:  # noqa: BLE001
             _say(f"  solve failed: {e}")
             continue
@@ -194,12 +291,13 @@ def main() -> None:
     p.add_argument("view", nargs="?")
     p.add_argument("--data", default=os.environ.get("TREELIGHTS_DATA", "/data"))
     p.add_argument("--variants", default=",".join(VARIANTS))
+    p.add_argument("--no-cache", action="store_true", help="detect the blobs again instead of using /tmp's copy")
     a = p.parse_args()
     names = [v.strip() for v in a.variants.split(",") if v.strip()]
     bad = [v for v in names if v not in VARIANTS]
     if bad:
         sys.exit(f"unknown variant(s): {', '.join(bad)}; choose from {', '.join(VARIANTS)}")
-    run(Path(a.data), a.scan, a.view, names)
+    run(Path(a.data), a.scan, a.view, names, use_cache=not a.no_cache)
 
 
 if __name__ == "__main__":
