@@ -5,6 +5,7 @@ Run inside the container (Dockge: the stack's terminal, "bash"):
     python -m treelights.walk.diag                  # the most recent walk
     python -m treelights.walk.diag <scan> <view>    # a given one
     python -m treelights.walk.diag --variants base,point
+    python -m treelights.walk.diag --clocks         # only the walk's timestamps (seconds)
 
 Progress is printed as it goes, each line with the time since the start. The detected
 blobs are cached in /tmp inside the container (not in your data), so running it again
@@ -186,7 +187,43 @@ def _blob_stats(name: str, det) -> None:
              f"{np.median(sh[bright]):.2f}, share >= 0.5 (counted as points by default) {np.mean(sh[bright] >= 0.5):.0%}")
 
 
-def run(data: Path, scan_id: str | None, vid: str | None, variants: list[str], use_cache: bool = True) -> None:
+def _span(name: str, t) -> None:
+    t = np.asarray(t, float)
+    if not len(t):
+        _say(f"  {name}: none")
+        return
+    gaps = np.diff(t)
+    _say(f"  {name}: {len(t)} stamps, first {t[0]:.3f}, last {t[-1]:.3f}, span {t[-1] - t[0]:.1f} s"
+         + (f", steps median {np.median(gaps):.3f} s, backwards {int((gaps < 0).sum())}, largest gap {gaps.max():.1f} s" if len(gaps) else ""))
+
+
+def clocks(scan, vid: str, view: dict, d: Path, video: Path) -> None:
+    """The walk's timestamps. Live frames, the motion log and the recording start should all be
+    on the phone's clock (seconds) and overlap; the recording's own times start near 0."""
+    from .. import storage
+
+    _say("Timestamps (seconds):")
+    _span("live frames", [r["t"] for r in storage.iter_jsonl(d / "live.jsonl")])
+    _span("motion log ", [r["t"] for r in storage.iter_jsonl(d / "motion.jsonl")])
+    rs = view.get("rec_start")
+    _say(f"  recording started at: {rs}")
+    if video.exists() and video.stat().st_size > 0:
+        import av
+
+        ts = []
+        with av.open(str(video)) as c:
+            st = c.streams.video[0]
+            for pkt in c.demux(st):
+                if pkt.pts is not None:
+                    ts.append(float(pkt.pts * pkt.time_base))
+        ts.sort()
+        _span("recording's own frame times", ts)
+        if rs is not None and ts:
+            _say(f"  recording on the phone clock: {rs + ts[0]:.3f} .. {rs + ts[-1]:.3f}")
+
+
+def run(data: Path, scan_id: str | None, vid: str | None, variants: list[str], use_cache: bool = True,
+        only_clocks: bool = False) -> None:
     from ..capture.store import ScanStore
     from ..config import ConfigStore
     from ..reconstruction import sfm
@@ -215,6 +252,9 @@ def run(data: Path, scan_id: str | None, vid: str | None, variants: list[str], u
         height = None
     _say(f"Walk {scan_id}/{vid}: {n} LEDs, tree height {height} cm, recording "
          f"{video.stat().st_size / 1e6:.0f} MB" if video.exists() else f"Walk {scan_id}/{vid}: {n} LEDs, no recording")
+    clocks(scan, vid, view, d, video)
+    if only_clocks:
+        return
     log_t, log_q = load_motion(d)
     t0 = time.time()
     cache = Path(f"/tmp/treelights-diag-{scan_id}-{vid}.pkl")
@@ -263,6 +303,14 @@ def run(data: Path, scan_id: str | None, vid: str | None, variants: list[str], u
         unamb = [sum(1 for c in o.values() if sfm.unambiguous(c) is not None) for o in obs.values()]
         _say(f"  LEDs decoded (either source): {len(dec)} of {n}; keyframes {len(obs)}; per keyframe (median): "
              f"identified {np.median(ident) if ident else 0:.0f}, usable for the cameras {np.median(unamb) if unamb else 0:.0f}")
+        for r in wr.results:
+            pt = r.source.phone_t if r.source.phone_t is not None else r.frame_t
+            _say(f"  {r.source.name} frames on the phone clock: {np.min(pt):.1f} .. {np.max(pt):.1f}")
+        kf = {}
+        for sm in wr.segments.values():
+            kf.setdefault(sm["source"], []).append(sm["t_phone"])
+        for src_name, tt in kf.items():
+            _say(f"  keyframes from {src_name}: {len(tt)}, at {min(tt):.1f} .. {max(tt):.1f}")
         if not obs:
             continue
         segs = {s: dict(m, view=vid) for s, m in wr.segments.items()}
@@ -292,12 +340,13 @@ def main() -> None:
     p.add_argument("--data", default=os.environ.get("TREELIGHTS_DATA", "/data"))
     p.add_argument("--variants", default=",".join(VARIANTS))
     p.add_argument("--no-cache", action="store_true", help="detect the blobs again instead of using /tmp's copy")
+    p.add_argument("--clocks", action="store_true", help="only print the walk's timestamps (quick)")
     a = p.parse_args()
     names = [v.strip() for v in a.variants.split(",") if v.strip()]
     bad = [v for v in names if v not in VARIANTS]
     if bad:
         sys.exit(f"unknown variant(s): {', '.join(bad)}; choose from {', '.join(VARIANTS)}")
-    run(Path(a.data), a.scan, a.view, names, use_cache=not a.no_cache)
+    run(Path(a.data), a.scan, a.view, names, use_cache=not a.no_cache, only_clocks=a.clocks)
 
 
 if __name__ == "__main__":
