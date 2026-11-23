@@ -29,7 +29,7 @@ type WalkStatus = {
 };
 
 const WARNINGS: Record<string, string> = {
-  out_of_frame: "Some LEDs are at the edge of the picture: step back so the whole tree fits.",
+  out_of_frame: "Part of the tree is out of the picture. That's fine: tilt slowly so the top and bottom are each in view for several seconds.",
   few_leds: "Hardly any LEDs in view: point the camera at the tree.",
   pattern_not_found: "The blinking pattern isn't being picked up. Is the tree in view and the room dark enough?",
 };
@@ -98,14 +98,15 @@ export function scanPage(): Page {
             h("li", {}, "Clear a path all the way around the tree, about 1.5–2 m out, so you can walk without looking down."),
             h("li", {}, "Use a phone that is charged, on good Wi-Fi near the router. 5 GHz Wi-Fi is best."),
             h("li", {}, "Wipe the camera lens."),
-            h("li", {}, "Find the starting point: stand where the whole tree, top to bottom, fits in the picture with a little space around it."),
+            h("li", {}, "Find the starting point: best where the whole tree, top to bottom, fits in the picture. In a small room, stand as far back as you can; it's fine if part of the tree is out of the picture."),
           )),
         h("div", { class: "card small" },
           h("h2", {}, "How to walk"),
           h("ol", {},
             h("li", {}, h("b", {}, "Tap Start walking. "), "Allow the camera and motion sensors if asked. All LEDs start blinking. That's the pattern being read, so leave them on."),
             h("li", {}, h("b", {}, "Hold the phone steady, pointing at the tree, "), "best at about the middle height of the tree. Don't rotate it between portrait and landscape during the walk."),
-            h("li", {}, h("b", {}, "Walk slowly once around the tree, "), "about a minute for the whole circle, keeping the whole tree in the picture. Your path doesn't need to be a neat circle: going closer or further (around furniture, say) and holding the phone higher or lower is fine. Small steps, no hurry."),
+            h("li", {}, h("b", {}, "Walk slowly once around the tree, "), "about a minute for the whole circle, keeping the tree in the picture. Your path doesn't need to be a neat circle: going closer or further (around furniture, say) and holding the phone higher or lower is fine. Small steps, no hurry."),
+            h("li", {}, h("b", {}, "If the tree doesn't fit, "), "tilt the phone slowly up and down as you walk so every part of the tree is in view for a while. Each LED needs about 8 seconds in view to be identified, so tilt gently and walk a little slower; going round twice also helps."),
             h("li", {}, h("b", {}, "Watch the ring. "), "Each segment is one side of the tree: it turns yellow when you've passed it and green when enough LEDs were found there. The number in the middle counts the LEDs found so far."),
             h("li", {}, h("b", {}, "Keep going a little past where you started, "), "then tap Stop. Keep this page open while the video uploads and the map is built (a minute or two)."),
           )),
@@ -115,7 +116,7 @@ export function scanPage(): Page {
           h("summary", {}, "What the warnings mean"),
           h("ul", {},
             h("li", {}, h("b", {}, "Slow down: "), "you're turning faster than the camera can follow; the LEDs smear. Walk slower."),
-            h("li", {}, h("b", {}, "Step back: "), "LEDs are at the edge of the picture. Move further out until the whole tree fits."),
+            h("li", {}, h("b", {}, "Part of the tree is out of the picture: "), "fine in a small room. Step back if you can. Otherwise tilt slowly up and down so the top and bottom are each in view for several seconds."),
             h("li", {}, h("b", {}, "Point the camera at the tree: "), "hardly any LEDs are in view."),
             h("li", {}, h("b", {}, "The blinking pattern isn't being picked up: "), "after about 20 s the server still can't see the pattern. Check that the tree is in view and blinking, and dim the room more."),
             h("li", {}, h("b", {}, "Reconnecting... keep walking: "), "the Wi-Fi dropped. Keep walking; the walk continues when the phone reconnects (within 15 s)."),

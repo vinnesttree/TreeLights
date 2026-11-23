@@ -59,6 +59,9 @@ class Scene:
     target: np.ndarray = field(default_factory=lambda: np.array([0.0, 100.0, 0.0]))
     faults: Faults = field(default_factory=Faults)
     led_gain: float = 1600.0  # core peak (DN) for a full single channel at reference distance
+    # Apparent radius of a lit bulb (lens, diffuser and glare). Real LEDs are extended sources:
+    # close up, or with a high-resolution camera, each covers many pixels. 0: a fixed small spot.
+    led_radius_cm: float = 0.0
     seed: int = 0
 
     def __post_init__(self) -> None:
@@ -233,7 +236,8 @@ class Scene:
             if vis[i] <= 0 or z[i] <= 0:
                 continue
             sharp = 0.5 + 0.5 * vis[i]
-            splat(centers[k], amp[k], 1.2 / sharp, 0.05 / sharp, duv[i])
+            size = np.hypot(1.2, self.led_radius_cm * self.intr.f / max(z[i], 1.0)) if self.led_radius_cm else 1.2
+            splat(centers[k], amp[k], size / sharp, 0.05 / sharp, duv[i])
             if f.glossy_prob and _hash01(i, glint_key, 7) < f.glossy_prob:
                 off = (np.array([_hash01(i, 1, 9), _hash01(i, 2, 9)]) - 0.5) * 40
                 splat(centers[k] + off, amp[k] * 0.35, 1.5, 0.02, duv[i])
