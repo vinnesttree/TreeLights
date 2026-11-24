@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from .. import storage
+from ..progress import Progress
 from ..capture.store import Scan
 from ..reconstruction.job import run_solve
 from .process import analyze, frames_from_images
@@ -63,24 +64,67 @@ def _video_images(path: Path):
             yield float(fr.time), img
 
 
+def _video_frame_count(path: Path) -> int:
+    """About how many frames the recording has (for progress; 0 if unknown)."""
+    import av
+
+    try:
+        with av.open(str(path)) as c:
+            s = c.streams.video[0]
+            if s.frames:
+                return int(s.frames)
+            dur = float(s.duration * s.time_base) if s.duration else (c.duration or 0) / 1e6
+            return int(dur * float(s.average_rate or 30))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _starts_when_used(make):
+    """A reporter whose step begins (is shown) only when it first reports."""
+    r = []
+
+    def report(frac: float = 0.0, detail: str = "") -> None:
+        if not r:
+            r.append(make())
+        r[0](frac, detail)
+
+    return report
+
+
 def process_walk(scan_root: str, vid: str, tree_height_cm: float | None, prev_map: dict | None, wled: dict | None,
-                 f0_prior: float | None = None, video_path: str | None = None) -> dict:
+                 f0_prior: float | None = None, video_path: str | None = None, progress_path: str | None = None) -> dict:
     scan = Scan(Path(scan_root))
     d = scan.root / "walk" / vid
     view = scan.view(vid)
     n = int(scan.meta["led_count"])
     log_t, log_q = load_motion(d)
-    live = frames_from_images(_live_images(d))
+    # Progress: five steps, weighted by frames (decoding a frame takes ~3x finding its LEDs;
+    # timings of a real 600-LED walk), with the solve a tenth of the whole.
+    has_video = bool(video_path and Path(video_path).exists() and Path(video_path).stat().st_size > 0)
+    n_live = sum(1 for _ in storage.iter_jsonl(d / "live.jsonl")) if (d / "live.jsonl").exists() else 0
+    n_video = _video_frame_count(Path(video_path)) if has_video else 0
+    w = [n_live, n_video, 3 * n_live, 3 * n_video]
+    w.append(0.1 * max(sum(w), 1) / 0.9)
+    edges = np.concatenate([[0.0], np.cumsum(w) / max(sum(w), 1e-9)])
+    steps = ["Finding the LEDs in the live frames", "Finding the LEDs in the recording", "Decoding the live frames",
+             "Decoding the recording", "Building the 3D map"]
+    prog = Progress(progress_path)
+
+    def part(k: int):
+        return prog.part(float(edges[k]), float(edges[k + 1]), f"Step {k + 1} of 5: {steps[k]}")
+
+    live = frames_from_images(_live_images(d), part(0), n_live)
     video = None
     notes = []
-    if video_path and Path(video_path).exists() and Path(video_path).stat().st_size > 0:
+    if has_video:
         try:
-            video = frames_from_images(_video_images(Path(video_path)))
+            video = frames_from_images(_video_images(Path(video_path)), part(1), n_video)
         except Exception as e:  # noqa: BLE001
             notes.append(f"The recording couldn't be decoded ({e}); using the live frames only.")
     elif not video_path:
         notes.append("No recording was uploaded; using the live frames only.")
-    wr = analyze(n, live if live[0] else None, video if video and video[0] else None, log_t, log_q, view.get("rec_start"))
+    wr = analyze(n, live if live[0] else None, video if video and video[0] else None, log_t, log_q, view.get("rec_start"),
+                 report_live=_starts_when_used(lambda: part(2)), report_video=_starts_when_used(lambda: part(3)))
     wr.notes = notes + wr.notes
     # Segment ids unique within the scan: <view><keyframe>.
     obs = {f"{vid}{k}": v for k, v in wr.obs.items()}
@@ -94,5 +138,5 @@ def process_walk(scan_root: str, vid: str, tree_height_cm: float | None, prev_ma
     scan.set_view(vid, status="processed", walk=info, segments=sorted(segs))
     if not obs:
         raise RuntimeError("No LEDs were identified in the walk: " + " ".join(wr.notes or ["is the pattern visible?"]))
-    m = run_solve(str(scan.root), tree_height_cm, prev_map, wled, f0_prior)
+    m = run_solve(str(scan.root), tree_height_cm, prev_map, wled, f0_prior, report=part(4))
     return m

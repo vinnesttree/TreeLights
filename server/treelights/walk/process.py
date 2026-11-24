@@ -7,6 +7,7 @@ from typing import Callable, Iterable
 
 import numpy as np
 
+from ..progress import Report
 from ..reconstruction.solve import SolveInput, solve
 from .blobs import detect_blobs
 from .pipeline import Source, SourceResult, build_observations, focal_prior, process_source, video_phone_times
@@ -22,9 +23,12 @@ class WalkResult:
     notes: list[str] = field(default_factory=list)
 
 
-def frames_from_images(items: Iterable[tuple[float, np.ndarray]]) -> tuple[list[Frame], int, int]:
+def frames_from_images(items: Iterable[tuple[float, np.ndarray]], report: Report | None = None,
+                       total: int | None = None) -> tuple[list[Frame], int, int]:
     frames, w, h = [], 0, 0
-    for t, img in items:
+    for k, (t, img) in enumerate(items):
+        if report is not None and total and k % 25 == 0:
+            report(k / total, f"{k} of {total} frames")
         h, w = img.shape[:2]
         frames.append(Frame(float(t), detect_blobs(img)))
     return frames, w, h
@@ -32,7 +36,8 @@ def frames_from_images(items: Iterable[tuple[float, np.ndarray]]) -> tuple[list[
 
 def analyze(n: int, live: tuple[list[Frame], int, int] | None, video: tuple[list[Frame], int, int] | None,
             log_t: np.ndarray | None, log_q: np.ndarray | None, rec_start: float | None,
-            progress: Callable[[str], None] = lambda m: None) -> WalkResult:
+            progress: Callable[[str], None] = lambda m: None,
+            report_live: Report | None = None, report_video: Report | None = None) -> WalkResult:
     results: list[SourceResult] = []
     notes: list[str] = []
     live_res = None
@@ -40,7 +45,8 @@ def analyze(n: int, live: tuple[list[Frame], int, int] | None, video: tuple[list
         frames, w, h = live
         frames.sort(key=lambda f: f.t)
         progress("Decoding the live frames...")
-        live_res = process_source(Source("live", frames, w, h, np.array([f.t for f in frames])), n, log_t, log_q)
+        live_res = process_source(Source("live", frames, w, h, np.array([f.t for f in frames])), n, log_t, log_q,
+                                  report=report_live)
         results.append(live_res)
         notes += live_res.notes
         if live_res.log_shift and log_t is not None:
@@ -50,7 +56,7 @@ def analyze(n: int, live: tuple[list[Frame], int, int] | None, video: tuple[list
         frames.sort(key=lambda f: f.t)
         progress("Decoding the video...")
         fn = lambda t, timing: video_phone_times(t, timing, live_res, rec_start)  # noqa: E731
-        res = process_source(Source("video", frames, w, h), n, log_t, log_q, phone_time_fn=fn)
+        res = process_source(Source("video", frames, w, h), n, log_t, log_q, phone_time_fn=fn, report=report_video)
         results.append(res)
         notes += res.notes
         if live_res is None or not live_res.timing.ok:

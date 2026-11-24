@@ -306,6 +306,10 @@ export function mapPage(): Page {
       }
 
       // ---- decoding old walks again with the current version ----
+      let recMsgNow: HTMLElement | null = null; // the Recordings card's message area on screen now
+      let following: string | null = null; // the job whose progress is being shown
+      let pendingRecMsg: Node | null = null; // a result to show in the card once it is redrawn
+
       async function renderRecordings() {
         let list: any[] = [];
         try {
@@ -315,6 +319,11 @@ export function mapPage(): Page {
           return;
         }
         const recMsg = h("div");
+        recMsgNow = recMsg;
+        if (pendingRecMsg) {
+          recMsg.replaceChildren(pendingRecMsg);
+          pendingRecMsg = null;
+        }
         const rows = list.map((w) => {
           const raw = w.video_mb > 0 || w.live_frames > 0;
           const what = [w.video_mb > 0 ? `recording ${w.video_mb} MB` : "", w.live_frames ? `${w.live_frames} live frames` : ""].filter(Boolean).join(", ");
@@ -338,26 +347,71 @@ export function mapPage(): Page {
           recMsg,
           h("p", { class: "small muted" }, "To save space, the raw recordings of all but the 2 most recent scans (and the active map's scan) are deleted when a new scan starts."),
         );
+        // A decode or solve started earlier (or from another device) is still running: follow it.
+        try {
+          const running = (await api<any[]>("/api/jobs")).filter((j) => j.kind === "walk" || j.kind === "solve");
+          if (running.length && running[0].id !== following) {
+            const j = running[0];
+            const w = list.find((x) => x.scan === j.scan && (!j.view || x.view === j.view));
+            const name = w ? `${w.created ?? w.scan} · ${w.view}` : j.scan;
+            await waitJob(j, recMsg, j.kind === "walk" ? `Decoding ${name} again` : `Solving ${name} again`);
+          }
+        } catch (e) {
+          recMsg.replaceChildren(h("div", { class: "notice fail" }, fmtErr(e)));
+        }
       }
 
-      async function waitJob(job: any, recMsg: HTMLElement, what: string): Promise<void> {
-        recMsg.replaceChildren(h("div", { class: "notice warn" }, `${what}... this can take a few minutes.`));
-        while (job.status === "running") {
-          await new Promise((r) => setTimeout(r, 2000));
-          job = await api(`/api/jobs/${job.id}`);
+      // Progress of a decode or solve: the step, a bar for the whole job, elapsed time and an
+      // estimate of the time left (from the pace so far, once there is enough of it).
+      function showProgress(what: string, job: any) {
+        const recMsg = recMsgNow;
+        if (!recMsg) return;
+        // One job at a time: no new decode or solve while this one runs.
+        for (const b of recBox.querySelectorAll<HTMLButtonElement>(".rec-row button")) b.disabled = true;
+        const p = job.progress;
+        const elapsed = Math.max(0, (job.now ?? Date.now() / 1000) - job.started);
+        const frac = p ? Math.min(1, Math.max(0, p.fraction)) : 0;
+        const mmss = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+        const left = frac > 0.03 && elapsed > 20 ? elapsed * (1 - frac) / frac : null;
+        recMsg.replaceChildren(h("div", { class: "notice warn job-progress" },
+          h("div", {}, h("b", {}, what), p ? ` · ${p.step}` : ""),
+          h("div", { class: "progress", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.round(frac * 100)) },
+            h("div", { style: { width: `${(frac * 100).toFixed(1)}%` } })),
+          h("div", { class: "small" },
+            `${Math.round(frac * 100)}%${p?.detail ? ` · ${p.detail}` : ""} · ${mmss(elapsed)} elapsed`,
+            left !== null ? ` · about ${left > 90 ? Math.round(left / 60) + " min" : Math.round(left) + " s"} left` : "",
+            p ? "" : " · starting...")));
+      }
+
+      async function waitJob(job: any, _recMsg: HTMLElement, what: string): Promise<void> {
+        following = job.id;
+        try {
+          showProgress(what, job);
+          while (job.status === "running") {
+            await new Promise((r) => setTimeout(r, 2000));
+            job = await api(`/api/jobs/${job.id}`);
+            if (job.status === "running") showProgress(what, job);
+          }
+        } finally {
+          following = null;
         }
-        if (job.status !== "done") throw new Error(job.error ?? "failed");
+        if (job.status !== "done") {
+          await renderRecordings(); // buttons back on; the caller shows the error
+          throw new Error(job.error ?? "failed");
+        }
         const c = job.result.quality.counts;
-        recMsg.replaceChildren(h("div", { class: "notice ok" }, `New version ${job.result.map}: ${c.measured} measured, ${c.estimated} estimated, ${c.unknown} unknown. Showing it now; activate it if it looks right.`));
+        // Loading the new version redraws this card (after the walks list arrives): the result
+        // goes into whichever card is on screen then.
+        pendingRecMsg = h("div", { class: "notice ok" }, `New version ${job.result.map}: ${c.measured} measured, ${c.estimated} estimated, ${c.unknown} unknown. Showing it now; activate it if it looks right.`);
         await loadVersions(job.result.map);
       }
 
       async function reprocess(w: any, recMsg: HTMLElement) {
         try {
           const job = await api(`/api/scans/${w.scan}/walk/${w.view}/process`, { body: { video: w.video_mb > 0 } });
-          await waitJob(job, recMsg, `Decoding ${w.view} of ${w.created ?? w.scan} again`);
+          await waitJob(job, recMsg, `Decoding ${w.created ?? w.scan} · ${w.view} again`);
         } catch (e) {
-          recMsg.replaceChildren(h("div", { class: "notice fail" }, fmtErr(e)));
+          (recMsgNow ?? recMsg).replaceChildren(h("div", { class: "notice fail" }, fmtErr(e)));
         }
       }
 
@@ -366,7 +420,7 @@ export function mapPage(): Page {
           const job = await api(`/api/scans/${scan}/solve`, { body: {} });
           await waitJob(job, recMsg, "Solving again");
         } catch (e) {
-          recMsg.replaceChildren(h("div", { class: "notice fail" }, fmtErr(e)));
+          (recMsgNow ?? recMsg).replaceChildren(h("div", { class: "notice fail" }, fmtErr(e)));
         }
       }
 

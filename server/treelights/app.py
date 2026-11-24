@@ -17,7 +17,7 @@ import numpy as np
 from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 
-from . import __version__, camcal, storage
+from . import __version__, camcal, progress, storage
 from .capture import video as videomode
 from .capture.session import CaptureSession
 from .capture.store import ScanStore
@@ -41,19 +41,32 @@ log = logging.getLogger(__name__)
 
 
 class Job:
-    def __init__(self, kind: str, scan: str):
+    def __init__(self, kind: str, scan: str, progress_dir: Path | None = None, view: str | None = None):
         self.id = uuid.uuid4().hex[:10]
         self.kind = kind
         self.scan = scan
+        self.view = view
         self.status = "running"
         self.result: Any = None
         self.error: str | None = None
         self.started = time.time()
         self.finished: float | None = None
+        # The worker process writes its progress here (treelights.progress).
+        self.progress_path: str | None = None
+        if progress_dir is not None:
+            progress_dir.mkdir(parents=True, exist_ok=True)
+            self.progress_path = str(progress_dir / f"{self.id}.json")
+
+    def finish(self) -> None:
+        self.finished = time.time()
+        if self.progress_path:
+            Path(self.progress_path).unlink(missing_ok=True)
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "kind": self.kind, "scan": self.scan, "status": self.status, "result": self.result,
-                "error": self.error, "started": self.started, "finished": self.finished}
+        return {"id": self.id, "kind": self.kind, "scan": self.scan, "view": self.view, "status": self.status,
+                "result": self.result, "error": self.error, "started": self.started, "finished": self.finished,
+                "now": time.time(),
+                "progress": progress.read(self.progress_path) if self.status == "running" else None}
 
 
 class AppState:
@@ -78,6 +91,8 @@ class AppState:
         self.session: CaptureSession | None = None
         self.walk: WalkSession | None = None
         self.jobs: dict[str, Job] = {}
+        for stale in (self.data_dir / "jobs").glob("*.json*"):  # progress of jobs from before a restart
+            stale.unlink(missing_ok=True)
         self.guidance: dict | None = None
         self.control_clients: set[asyncio.Queue] = set()
         self.test_owner: str | None = None
@@ -163,7 +178,7 @@ class AppState:
             raise HTTPException(400, "not a walk-around view")
         if self.walk and self.walk.scan.id == scan_id and self.walk.vid == vid and self.walk.state == "walking":
             raise HTTPException(409, "The walk is still in progress.")
-        job = Job("walk", scan_id)
+        job = Job("walk", scan_id, self.data_dir / "jobs", vid)
         self.jobs[job.id] = job
         s = self.config.settings
         prev = self.maps.active()
@@ -173,14 +188,15 @@ class AppState:
         async def run() -> None:
             try:
                 m = await asyncio.get_running_loop().run_in_executor(
-                    self.executor, process_walk, str(scan.root), vid, s.tree_height_cm, prev, wled, None, video_path)
+                    self.executor, process_walk, str(scan.root), vid, s.tree_height_cm, prev, wled, None, video_path,
+                    job.progress_path)
                 job.result = {"map": self.maps.save(m), "quality": m["quality"]}
                 job.status = "done"
             except Exception as e:  # noqa: BLE001
                 log.exception("walk processing failed")
                 job.status, job.error = "failed", str(e)
                 scan.set_view(vid, status="failed", error=str(e))
-            job.finished = time.time()
+            job.finish()
 
         asyncio.ensure_future(run())
         return job
@@ -277,7 +293,7 @@ class AppState:
     # ---- jobs --------------------------------------------------------------------------
     def start_solve(self, scan_id: str) -> Job:
         scan = self.scans.get(scan_id)
-        job = Job("solve", scan_id)
+        job = Job("solve", scan_id, self.data_dir / "jobs")
         self.jobs[job.id] = job
         s = self.config.settings
         prev = self.maps.active()
@@ -287,13 +303,13 @@ class AppState:
             try:
                 f0 = self.profiles.prior_for(scan.meta.get("segments", {}))
                 m = await asyncio.get_running_loop().run_in_executor(
-                    self.executor, run_solve, str(scan.root), s.tree_height_cm, prev, wled, f0)
+                    self.executor, run_solve, str(scan.root), s.tree_height_cm, prev, wled, f0, job.progress_path)
                 job.result = {"map": self.maps.save(m), "quality": m["quality"]}
                 job.status = "done"
             except Exception as e:  # noqa: BLE001
                 log.exception("solve failed")
                 job.status, job.error = "failed", str(e)
-            job.finished = time.time()
+            job.finish()
 
         asyncio.ensure_future(run())
         return job
@@ -574,6 +590,11 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
             return state.start_solve(sid).to_dict()
         except FileNotFoundError:
             raise HTTPException(404, "no such scan")
+
+    @app.get("/api/jobs")
+    def jobs_running() -> list[dict]:
+        """Jobs still running (decoding or solving), so a reloaded page can show their progress."""
+        return [j.to_dict() for j in state.jobs.values() if j.status == "running"]
 
     @app.get("/api/jobs/{jid}")
     def job(jid: str) -> dict:

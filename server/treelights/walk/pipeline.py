@@ -23,6 +23,7 @@ from . import gyro as gyromod
 from .blobs import FLUX
 from .decode import Identity, decode_tracks, identity_at
 from .pattern import CYCLE_T
+from ..progress import Report, sub
 from .timing import Timing, estimate
 from .tracking import Frame, TrackSet, stitch, track
 
@@ -74,12 +75,16 @@ class SourceResult:
 
 def process_source(src: Source, n_leds: int, log_t: np.ndarray | None, log_q: np.ndarray | None,
                    gyro_model: gyromod.GyroModel | None = None, f_prior: float | None = None,
-                   phone_time_fn=None, timing_hint: Timing | None = None) -> SourceResult:
+                   phone_time_fn=None, timing_hint: Timing | None = None, report: Report | None = None) -> SourceResult:
     """phone_time_fn(t, timing) -> phone-clock times, for sources (the video) whose frames
-    don't carry phone time; called once the source's own pattern timing is known."""
+    don't carry phone time; called once the source's own pattern timing is known.
+
+    report(fraction, detail): progress through this source (shares below are rough
+    timings of a real 600-LED walk; decoding takes longest)."""
     frames = src.frames
     t = np.array([f.t for f in frames])
     flux = np.array([float(f.blobs[:, FLUX].sum()) if len(f.blobs) else 0.0 for f in frames])
+    sub(report, 0.0, 0.02, "finding the blinking pattern")()
     timing = estimate(t, flux)
     if not timing.ok and timing_hint is not None and timing_hint.ok:
         timing = timing_hint  # the pattern's phase doesn't drift: a timing found earlier still holds
@@ -88,7 +93,7 @@ def process_source(src: Source, n_leds: int, log_t: np.ndarray | None, log_q: np
     notes = []
     if not timing.ok:
         notes.append(f"{src.name}: the LED pattern wasn't found in the frames.")
-    ts = track(frames, None, use_gyro=False)
+    ts = track(frames, None, use_gyro=False, progress=sub(report, 0.02, 0.18, "following the LEDs"))
     if STITCH:
         ts = stitch(ts, t)
     tracking = "image"
@@ -103,6 +108,7 @@ def process_source(src: Source, n_leds: int, log_t: np.ndarray | None, log_q: np
         notes.append(f"{src.name}: the orientation sensor's clock was {-log_shift:+.1f} s off the camera's; "
                      "lined up by matching the phone's turning with the image motion.")
     if have_log and model is None:
+        sub(report, 0.18, 0.2, "calibrating the motion sensor")()
         model = gyromod.calibrate(ts.rows, src.phone_t, log_t, log_q, src.width, src.height, f_prior)
         if not model.ok:
             notes.append(f"{src.name}: the orientation sensor didn't match the camera motion; not used.")
@@ -114,11 +120,11 @@ def process_source(src: Source, n_leds: int, log_t: np.ndarray | None, log_q: np
             fr.meta["q"] = qq
         f_px = model.f * scale
         K = np.array([[f_px, 0, (src.width - 1) / 2], [0, f_px, (src.height - 1) / 2], [0, 0, 1.0]])
-        ts_g = track(frames, K, use_gyro=True)
+        ts_g = track(frames, K, use_gyro=True, progress=sub(report, 0.2, 0.36, "following the LEDs with the motion sensor"))
         if STITCH:
             ts_g = stitch(ts_g, t)
-        ids_g = decode_tracks(ts_g, t, timing, n_leds)
-        ids = decode_tracks(ts, t, timing, n_leds)
+        ids_g = decode_tracks(ts_g, t, timing, n_leds, progress=sub(report, 0.36, 0.68, "reading the LEDs' codes"))
+        ids = decode_tracks(ts, t, timing, n_leds, progress=sub(report, 0.68, 1.0, "reading the LEDs' codes (second pass)"))
         # The gyro's prediction helps most with hand jitter at full frame rate; with
         # frames far apart (the live stream) the walk's own motion dominates and it
         # can do worse. Keep whichever tracking identifies more detections.
@@ -126,7 +132,7 @@ def process_source(src: Source, n_leds: int, log_t: np.ndarray | None, log_q: np
             ts, ids = ts_g, ids_g
             tracking = "gyro"
     else:
-        ids = decode_tracks(ts, t, timing, n_leds)
+        ids = decode_tracks(ts, t, timing, n_leds, progress=sub(report, 0.2, 1.0, "reading the LEDs' codes"))
     cal = {} if model is None else dict(model.info, ok=model.ok, f=round(model.f, 1), delta=round(model.delta, 3))
     cal["tracking"] = tracking
     return SourceResult(src, timing, ts, ids, model if (model and model.ok) else None, notes, cal, log_shift)

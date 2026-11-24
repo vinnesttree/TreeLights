@@ -101,11 +101,11 @@ def _hook_progress() -> None:
         _say(f"    {src['name']}: pattern timing {'found' if r.ok else 'NOT found'} ({time.time() - t:.0f} s)")
         return r
 
-    def track(frames, K=None, use_gyro=True):
+    def track(frames, K=None, use_gyro=True, **kw):
         how = "with the gyro" if use_gyro and K is not None else "without the gyro"
         _say(f"    {src['name']}: tracking {how}...")
         t = time.time()
-        r = orig_track(_Progress(frames, f"tracking {src['name']} ({how})"), K, use_gyro)
+        r = orig_track(_Progress(frames, f"tracking {src['name']} ({how})"), K, use_gyro, **kw)
         _say(f"    {src['name']}: tracking {how} done: {r.n_tracks} tracks ({time.time() - t:.0f} s)")
         return r
 

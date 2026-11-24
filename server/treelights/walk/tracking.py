@@ -166,7 +166,7 @@ def _greedy_match(pred: np.ndarray, pts: np.ndarray, gate: np.ndarray | float) -
     return mt, mb
 
 
-def track(frames: list[Frame], K: np.ndarray | None = None, use_gyro: bool = True) -> TrackSet:
+def track(frames: list[Frame], K: np.ndarray | None = None, use_gyro: bool = True, progress=None) -> TrackSet:
     """frames must be sorted by time.
 
     Lost tracks (not seen for MAX_COAST_S, e.g. hidden behind a branch) keep being
@@ -182,7 +182,10 @@ def track(frames: list[Frame], K: np.ndarray | None = None, use_gyro: bool = Tru
     shift_rate = np.zeros(2)  # px/s of motion not explained by the gyro
     lock = 0
     prev = None
+    every = max(1, len(frames) // 100)
     for fi, fr in enumerate(frames):
+        if progress is not None and fi % every == 0:
+            progress(fi / len(frames))
         b = fr.blobs
         bxy = b[:, [X, Y]].astype(float) if len(b) else np.zeros((0, 2))
         gyro = use_gyro and K is not None and fr.R is not None and prev is not None and prev.R is not None

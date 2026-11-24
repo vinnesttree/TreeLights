@@ -68,6 +68,7 @@ ul.checks li { display: flex; gap: 10px; padding: 6px 0; border-bottom: 1px soli
 ul.checks li:last-child { border-bottom: 0; }
 .progress { height: 10px; background: var(--bg); border-radius: 999px; overflow: hidden; border: 1px solid var(--border); }
 .progress > div { height: 100%; background: var(--accent); transition: width .2s; }
+.job-progress .progress { margin: 8px 0 6px; }
 table { width: 100%; border-collapse: collapse; font-size: .9rem; }
 td, th { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); vertical-align: top; }
 .viewer { width: 100%; height: min(70vh, 560px); border-radius: 12px; overflow: hidden; background: #05080b; position: relative; touch-action: none; }

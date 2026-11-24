@@ -214,13 +214,18 @@ def _trim(cs: list[int], cycles: dict, code: np.ndarray | None) -> tuple[float, 
     return seq[start][0] - 2 * T_SLOT, seq[end][0]
 
 
-def decode_tracks(ts: TrackSet, frame_t: np.ndarray, timing: Timing, n_leds: int, min_rows: int = 20) -> dict[int, list[Identity]]:
+def decode_tracks(ts: TrackSet, frame_t: np.ndarray, timing: Timing, n_leds: int, min_rows: int = 20,
+                  progress=None) -> dict[int, list[Identity]]:
     """track id -> identities with the pattern-time range each covers."""
     out: dict[int, list[Identity]] = {}
     if not timing.ok or len(ts.rows) == 0:
         return out
     sampled = sampled_slots(frame_t, timing)
-    for tid, rows in ts.by_track().items():
+    by = ts.by_track()
+    every = max(1, len(by) // 100)
+    for k, (tid, rows) in enumerate(by.items()):
+        if progress is not None and k % every == 0:
+            progress(k / len(by))
         if len(rows) < min_rows:
             continue
         ids = decode_track(rows, frame_t, timing, n_leds, sampled)
