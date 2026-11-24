@@ -13,6 +13,7 @@ export function homePage(): Page {
             h("li", {}, h("a", { href: "#/map" }, "Map"), ": review, fix and activate the 3D map."),
             h("li", {}, h("a", { href: "#/test" }, "Test"), ": run the sweep test on the real tree."),
             h("li", {}, h("a", { href: "#/effects" }, "Effects"), ": 3D volumetric effects and surface patterns, with WLED-style colors and palettes."),
+            h("li", {}, h("a", { href: "#/schedule" }, "Schedule"), ": switch the tree on and off, with timers at set times or at sunrise and sunset. Home Assistant is set up on the Setup page."),
           ),
         ),
         h("div", { class: "card small" },
@@ -31,6 +32,7 @@ export function homePage(): Page {
           h("div", {}, `LEDs: ${s.led_count}`),
           h("div", {}, `Tree height: ${s.tree_height_cm ? s.tree_height_cm + " cm" : "not set"}`),
           h("div", {}, `Active map: ${s.active_map ?? "none yet"}`),
+          h("div", {}, `Lights: ${s.lights?.on ? "on" : "off"}${s.next_timer ? `; next timer: ${s.next_timer.action} ${new Date(s.next_timer.at).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}` : ""}`),
           s.map_warning ? h("div", { class: "notice warn" }, s.map_warning) : "",
           h("div", {}, `Current scan: ${s.scan ?? "none"}`),
         );

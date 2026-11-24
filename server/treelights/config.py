@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
+import uuid
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import storage
 
@@ -43,6 +46,78 @@ class CaptureSettings(BaseModel):
     retries: int = 2
 
 
+class Timer(BaseModel):
+    """Turn the lights on or off at a time of day, or at sunrise / sunset with an offset."""
+
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex[:8])
+    enabled: bool = True
+    action: Literal["on", "off"] = "on"
+    trigger: Literal["time", "sunrise", "sunset"] = "time"
+    time: str = "18:00"  # HH:MM local time, for trigger "time"
+    offset_min: int = Field(0, ge=-720, le=720)  # minutes after (negative: before) sunrise / sunset
+    days: list[int] = Field(default_factory=lambda: list(range(7)))  # 0 = Monday ... 6 = Sunday
+    effect: str | None = None  # "on" only: the effect to run; None keeps the last one used
+    brightness: float | None = Field(None, ge=0.0, le=1.0)  # "on" only; None keeps the last one
+
+    @field_validator("time")
+    @classmethod
+    def _hhmm(cls, v: str) -> str:
+        m = re.fullmatch(r"(\d{1,2}):(\d{2})", v.strip())
+        if not m or int(m[1]) > 23 or int(m[2]) > 59:
+            raise ValueError("time must be HH:MM (00:00-23:59)")
+        return f"{int(m[1]):02d}:{m[2]}"
+
+    @field_validator("days")
+    @classmethod
+    def _days(cls, v: list[int]) -> list[int]:
+        if any(not 0 <= d <= 6 for d in v):
+            raise ValueError("days are 0 (Monday) to 6 (Sunday)")
+        return sorted(set(v))
+
+
+class ScheduleSettings(BaseModel):
+    enabled: bool = True
+    # IANA name such as "Europe/Berlin". None: the TZ environment variable, else UTC.
+    timezone: str | None = None
+    latitude: float | None = Field(None, ge=-90, le=90)  # needed for sunrise / sunset
+    longitude: float | None = Field(None, ge=-180, le=180)  # positive east
+    timers: list[Timer] = Field(default_factory=list)
+
+    @field_validator("timezone")
+    @classmethod
+    def _tz(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
+        try:
+            ZoneInfo(v.strip())
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError(f"unknown time zone {v!r} (use a name like Europe/Berlin)")
+        return v.strip()
+
+
+class MqttSettings(BaseModel):
+    """Home Assistant integration through an MQTT broker, with MQTT discovery."""
+
+    enabled: bool = False
+    host: str | None = None
+    port: int = Field(1883, ge=1, le=65535)
+    username: str | None = None
+    password: str | None = None
+    tls: bool = False
+    discovery_prefix: str = "homeassistant"
+    # Topics are <base_topic>/...; also names the device in Home Assistant's unique ids, so
+    # give each TreeLights server its own.
+    base_topic: str = "treelights"
+
+    @field_validator("discovery_prefix", "base_topic")
+    @classmethod
+    def _topic(cls, v: str) -> str:
+        v = v.strip().strip("/")
+        if not v or any(c in v for c in "#+ ") or len(v) > 100:
+            raise ValueError("a topic must be non-empty, without spaces, '#' or '+'")
+        return v
+
+
 class Settings(BaseModel):
     tree_height_cm: float | None = None
     pin: str | None = None
@@ -52,6 +127,8 @@ class Settings(BaseModel):
     wled: WledSettings = Field(default_factory=WledSettings)
     power: PowerSettings = Field(default_factory=PowerSettings)
     capture: CaptureSettings = Field(default_factory=CaptureSettings)
+    schedule: ScheduleSettings = Field(default_factory=ScheduleSettings)
+    mqtt: MqttSettings = Field(default_factory=MqttSettings)
 
 
 class ConfigStore:

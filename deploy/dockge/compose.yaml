@@ -44,3 +44,5 @@ services:
       # The HTTPS certificate covers the host's LAN addresses, detected automatically.
       # If the phone can't connect (several network interfaces, VPNs), set it here:
       # TREELIGHTS_HOST_IPS: 192.168.1.20
+      # Time zone for the timers, if not set on the Schedule page:
+      # TZ: Europe/Berlin

@@ -160,6 +160,32 @@ The **Effects** page runs effects on the tree. It works like WLED's: choose an e
   - `POST /api/test/start` with `{"effect": "helix", "brightness": 0.5, "params": {"speed": 128, "intensity": 90, "c1": 70, "c2": 100, "c3": 0, "palette": "ocean", "colors": ["#ff0000", "#000000", "#000000"]}}` starts an effect.
   - `POST /api/effects/params` with `{"params": {...}, "brightness": 0.7}` changes the running effect without restarting it.
 
+## Switching on and off: timers and Home Assistant
+
+The **Schedule** page switches the tree on and off.
+- **On** runs an effect: the one chosen, else the last one used on the Effects page (with its sliders, palette, colors and brightness), else Twinkle.
+- **Off** stops the effect and turns WLED itself off. Without that, WLED would go back to its own effect.
+- Lights that were on stay on after a restart of the container. While a scan holds the LEDs, switching is refused.
+
+**Timers** run on the server, so no browser needs to be open.
+- Each timer turns the lights on or off at a time of day, or at sunrise or sunset with an offset in minutes (for example *on at sunset −15 min*, *off at 23:00 on weekdays*).
+- An "on" timer can choose an effect and brightness, or keep the last ones.
+- **Set the time zone and location first**, on the same page. *Use this device's location* fills both in from the phone. The location is only used to work out sunrise and sunset (NOAA's formulas; within about a minute). Without a time zone, the `TZ` variable of the container is used, else UTC.
+- Daylight saving is handled. If the server was down when a timer was due, the last missed event (up to a day back) is applied when it starts, unless the lights were switched by hand after it.
+- *Run the timers* pauses or resumes them all.
+
+**Home Assistant** (MQTT discovery). Under *Home Assistant* on the Setup page, enter the MQTT broker, for example Home Assistant's Mosquitto add-on (with the MQTT integration set up), plus a username and password if the broker needs them. A *TreeLights* device then appears in Home Assistant by itself, with:
+- a **light**: on/off, brightness, effect (the effect list), and RGB color (sets *Color 1*);
+- **Palette** (select), **Speed** and **Intensity** (numbers);
+- **Schedule** (a switch that pauses the timers) and **Next timer** (a timestamp sensor).
+
+Topics are `treelights/...` (availability `treelights/status`). Give a second tree its own topic on the Setup page. Turning the integration off removes the device from Home Assistant. Don't control the tree with Home Assistant's own WLED integration at the same time: TreeLights is what sends the frames.
+
+**API:**
+- `GET`/`POST /api/lights`, for example `{"on": true, "effect": "twinkle", "brightness": 0.6}` or `{"on": false}`.
+- `GET`/`PUT /api/schedule` with `{"timezone": "Europe/Berlin", "latitude": 52.52, "longitude": 13.40, "timers": [{"action": "on", "trigger": "sunset", "offset_min": -15}, {"action": "off", "trigger": "time", "time": "23:00", "days": [0,1,2,3,4]}]}` (days: 0 = Monday).
+- `GET /api/homeassistant` shows the broker connection.
+
 **Advanced: tripod capture.** For a tree that can be turned, or one you can't walk around (see *Advanced* on the home page):
 1. *Camera calibration* (optional, once per phone): show the board on a computer screen and capture about 15 views.
 2. *Calibrate* on the tripod phone: start the camera, light the tree, tap *Lock camera*.
@@ -212,6 +238,7 @@ Layout:
 - `server/treelights/`
   - `wled/`: DDP, JSON API, discovery, monitor
   - `output/`: lease and keepalive thread
+  - `lights.py`, `schedule.py`, `sun.py`, `homeassistant.py`: on/off, timers, sunrise/sunset, Home Assistant over MQTT
   - `walk/`: walk-around capture (pattern, timing, tracking, gyro calibration, decoding, session, job)
   - `capture/`: tripod live session, scan store, video mode
   - `detection/`
@@ -235,6 +262,8 @@ Layout:
 | Scan: few LEDs identified on one side | Walk that side again more slowly, or start a new scan. LEDs hidden from every side are placed from the wiring and marked *estimated*. |
 | "The orientation sensor didn't match the camera motion" | The map is still built from the images. Hold the phone upright and don't rotate the screen during the walk. |
 | "Find controllers" finds nothing | The search uses mDNS and also sweeps the server's own /24 network for WLED. A controller on another subnet or VLAN isn't found: enter its IP address instead (shown in WLED's Wi-Fi settings or your router). |
+| Home Assistant: "Can't reach the MQTT broker" | Check the broker's address and port (1883, or 8883 with TLS) from the TreeLights host. Home Assistant's Mosquitto add-on needs a user: create one in Home Assistant and enter it on the Setup page. |
+| A timer fires at the wrong hour | Set the time zone on the Schedule page. The page shows which zone timers use and the time on the server. |
 | Realtime check fails | WLED Sync settings: *Receive UDP realtime* on. Nothing else (Home Assistant, xLights, another sender) should be streaming to WLED. |
 | Many rejected frames, wait time keeps growing | Weak WiFi. Put the phone on 5 GHz if possible, and move the router or the ESP32 closer. |
 | "The picture keeps moving" | Check the tripod. Let the tree settle after turning it. Keep people and pets out of the picture. |

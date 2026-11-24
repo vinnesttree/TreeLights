@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from pydantic import ValidationError
 
 from . import __version__, camcal, progress, storage
 from .capture import video as videomode
@@ -23,11 +24,14 @@ from .capture.session import CaptureSession
 from .capture.store import ScanStore
 from .config import ConfigStore
 from .effects import EFFECTS, LIBRARY, PALETTE_IDS, Identify, TreeGeometry, catalogue, library, make_renderer
+from .homeassistant import HomeAssistant
+from .lights import Lights, LightsBusy
 from .maps import guidance as guide
 from .maps import rescan
 from .maps.store import ActivationBlocked, MapStore, export_csv
 from .output.manager import OutputManager, PowerLimiter
 from .reconstruction.job import run_solve
+from .schedule import Scheduler
 from .walk import protocol as walkproto
 from .walk.job import process_walk
 from .walk.session import WalkSession
@@ -97,6 +101,9 @@ class AppState:
         self.control_clients: set[asyncio.Queue] = set()
         self.test_owner: str | None = None
         self.effect_renderer = None  # the running library effect, changeable live
+        self.lights = Lights(self)  # the tree as one on/off light (timers, Home Assistant)
+        self.scheduler = Scheduler(self.config, self.lights)
+        self.ha = HomeAssistant(self)
         self._apply_sender()
 
     # ---- output configuration ------------------------------------------------
@@ -200,6 +207,11 @@ class AppState:
 
         asyncio.ensure_future(run())
         return job
+
+    def has_map(self) -> bool:
+        """Is there an active map that fits the LED count (needed by 3D and surface effects)?"""
+        m = self.maps.active()
+        return bool(m and len(m["leds"]) == self.output.led_count and any(l.get("p") for l in m["leds"]))
 
     def fingerprint(self) -> str | None:
         return config_fingerprint(self.link.info, self.link.cfg) if self.link.info else None
@@ -344,6 +356,7 @@ class AppState:
         self.output.set_renderer(owner, renderer, fps=40)
         self.test_owner = owner
         self.effect_renderer = renderer if name in LIBRARY else None
+        self.lights.sync("app")
         return name
 
     @staticmethod
@@ -363,6 +376,7 @@ class AppState:
             raise HTTPException(422, str(e)) from e
         if brightness is not None:
             r.brightness = float(min(max(brightness, 0.0), 1.0))
+        self.lights.sync("app")
         return self.effect_state()
 
     def effect_state(self) -> dict | None:
@@ -374,6 +388,7 @@ class AppState:
     def stop_effect(self) -> None:
         self.output.release("test")
         self.effect_renderer = None
+        self.lights.sync("app")
 
 
 def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
@@ -397,6 +412,10 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
             except Exception as e:  # noqa: BLE001
                 log.warning("WLED not reachable at start-up: %s", e)
         state.monitor.start()
+        await state.lights.restore()  # lights that were on before the restart
+        state.lights.start()
+        state.scheduler.start()  # also applies a timer missed while the server was down
+        await state.ha.start()
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
@@ -409,6 +428,9 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
                 await state.brightness.restore()
             except Exception as e:  # noqa: BLE001
                 log.warning("couldn't restore WLED brightness; will retry at start-up: %s", e)
+        await state.ha.stop()
+        await state.scheduler.stop()
+        await state.lights.stop()
         await state.monitor.stop()
         await state.link.close()
         state.output.stop()
@@ -458,19 +480,31 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
             {k: len(v) if isinstance(v, list) else v for k, v in state.session.scan.meta["rescan"].items()},
             "guidance": state.guidance,
             "tree_height_cm": state.config.settings.tree_height_cm,
+            "lights": {"on": state.effect_state() is not None},
+            "next_timer": state.scheduler.next_event(),
         }
 
     @app.get("/api/config")
     def get_config() -> dict:
         d = state.config.settings.model_dump()
         d["pin"] = bool(d["pin"])
+        d["mqtt"]["password"] = bool(d["mqtt"]["password"])  # secrets are written, never read back
         return d
 
     @app.put("/api/config")
     async def put_config(patch: dict = Body(...)) -> dict:
         if "pin" in patch and patch["pin"] in (True, False):
             patch.pop("pin")
-        s = state.config.update(patch)
+        if isinstance(patch.get("mqtt"), dict) and patch["mqtt"].get("password") in (True, False):
+            patch["mqtt"].pop("password")  # the masked value from GET: unchanged
+        try:
+            s = state.config.update(patch)
+        except ValidationError as e:
+            raise HTTPException(422, _validation_message(e))
+        if "mqtt" in patch:
+            await state.ha.apply()
+        if "schedule" in patch:
+            state.scheduler.poke()
         if "wled" in patch:
             if s.wled.host:
                 state.link.set_host(s.wled.host, s.wled.mac, s.wled.http_port)
@@ -885,6 +919,46 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
         state.stop_effect()
         return {"ok": True}
 
+    # ---- lights on/off, timers, Home Assistant ------------------------------------------------
+    @app.get("/api/lights")
+    def lights_get() -> dict:
+        return state.lights.status()
+
+    @app.post("/api/lights")
+    async def lights_set(body: dict = Body(default={})) -> dict:
+        """`{"on": true, "effect"?, "params"?, "brightness"?}` or `{"on": false}`. Without "on",
+        changes the parameters (kept for the next "on" while off)."""
+        b = body.get("brightness")
+        try:
+            if body.get("on") is False:
+                return await state.lights.turn_off(source="app")
+            if body.get("on") is True:
+                return await state.lights.turn_on(body.get("effect"), body.get("params"),
+                                                  None if b is None else float(b), source="app")
+            return await state.lights.set_params(body.get("params"), None if b is None else float(b), source="app")
+        except LightsBusy as e:
+            raise HTTPException(409, str(e))
+        except (ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.get("/api/schedule")
+    def schedule_get() -> dict:
+        return state.scheduler.status()
+
+    @app.put("/api/schedule")
+    def schedule_put(body: dict = Body(...)) -> dict:
+        """The schedule settings (timers replace the list as a whole); returns the new status."""
+        try:
+            state.config.update({"schedule": body})
+        except ValidationError as e:
+            raise HTTPException(422, _validation_message(e))
+        state.scheduler.poke()
+        return state.scheduler.status()
+
+    @app.get("/api/homeassistant")
+    def homeassistant_status() -> dict:
+        return state.ha.status()
+
     # ---- WebSockets ----------------------------------------------------------------------
     @app.websocket("/ws/capture")
     async def ws_capture(ws: WebSocket) -> None:
@@ -1125,6 +1199,10 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
             return FileResponse(root / "index.html")
 
     return app
+
+
+def _validation_message(e: ValidationError) -> str:
+    return "; ".join(f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors())
 
 
 async def _safe(send, msg: dict) -> None:  # noqa: ANN001
