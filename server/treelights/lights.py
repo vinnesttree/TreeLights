@@ -143,9 +143,10 @@ class Lights:
             remembered = cur["params"] if cur and name == cur["effect"] else self.params if name == self.effect else None
             if remembered is not None:
                 base = dict(remembered)
-            else:  # another effect: its own slider defaults and palette, keeping the colors (as in WLED)
-                colors = (cur["params"] if cur else self.params).get("colors")
-                base = {**Params().merged(LIBRARY[name].defaults).to_dict(), **({"colors": colors} if colors else {})}
+            else:  # another effect: its own slider defaults, keeping the colors and palette (as in WLED)
+                prev = cur["params"] if cur else self.params
+                keep = {k: prev[k] for k in ("colors", "palette") if prev.get(k) is not None}
+                base = {**Params().merged(LIBRARY[name].defaults).to_dict(), **keep}
             b = self.brightness if brightness is None else brightness
             self.app.start_effect(name, float(min(max(b, 0.0), 1.0)), params={**base, **(params or {})})
         if cur is None:

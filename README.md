@@ -174,12 +174,7 @@ The **Schedule** page switches the tree on and off.
 - Daylight saving is handled. If the server was down when a timer was due, the last missed event (up to a day back) is applied when it starts, unless the lights were switched by hand after it.
 - *Run the timers* pauses or resumes them all.
 
-**Home Assistant** (MQTT discovery). Under *Home Assistant* on the Setup page, enter the MQTT broker, for example Home Assistant's Mosquitto add-on (with the MQTT integration set up), plus a username and password if the broker needs them. A *TreeLights* device then appears in Home Assistant by itself, with:
-- a **light**: on/off, brightness, effect (the effect list), and RGB color (sets *Color 1*);
-- **Palette** (select), **Speed** and **Intensity** (numbers);
-- **Schedule** (a switch that pauses the timers) and **Next timer** (a timestamp sensor).
-
-Topics are `treelights/...` (availability `treelights/status`). Give a second tree its own topic on the Setup page. Turning the integration off removes the device from Home Assistant. Don't control the tree with Home Assistant's own WLED integration at the same time: TreeLights is what sends the frames.
+**Home Assistant.** TreeLights appears in Home Assistant by itself through an MQTT broker (MQTT discovery), as a *TreeLights* device: a light with on/off, brightness, effect and color, plus palette, speed, intensity, a switch for the timers and the next timer. It needs a broker (for example the Mosquitto add-on) and Home Assistant's MQTT integration; then enter the broker and a login under *Home Assistant* on the Setup page. **Step-by-step setup, automations, MQTT topics and troubleshooting: [docs/home-assistant.md](docs/home-assistant.md).**
 
 **API:**
 - `GET`/`POST /api/lights`, for example `{"on": true, "effect": "twinkle", "brightness": 0.6}` or `{"on": false}`.
@@ -262,7 +257,7 @@ Layout:
 | Scan: few LEDs identified on one side | Walk that side again more slowly, or start a new scan. LEDs hidden from every side are placed from the wiring and marked *estimated*. |
 | "The orientation sensor didn't match the camera motion" | The map is still built from the images. Hold the phone upright and don't rotate the screen during the walk. |
 | "Find controllers" finds nothing | The search uses mDNS and also sweeps the server's own /24 network for WLED. A controller on another subnet or VLAN isn't found: enter its IP address instead (shown in WLED's Wi-Fi settings or your router). |
-| Home Assistant: "Can't reach the MQTT broker" | Check the broker's address and port (1883, or 8883 with TLS) from the TreeLights host. Home Assistant's Mosquitto add-on needs a user: create one in Home Assistant and enter it on the Setup page. |
+| Home Assistant: no TreeLights device, or "Can't reach the MQTT broker" / "refused" on the Setup page | See [Troubleshooting in the Home Assistant guide](docs/home-assistant.md#troubleshooting). |
 | A timer fires at the wrong hour | Set the time zone on the Schedule page. The page shows which zone timers use and the time on the server. |
 | Realtime check fails | WLED Sync settings: *Receive UDP realtime* on. Nothing else (Home Assistant, xLights, another sender) should be streaming to WLED. |
 | Many rejected frames, wait time keeps growing | Weak WiFi. Put the phone on 5 GHz if possible, and move the router or the ESP32 closer. |

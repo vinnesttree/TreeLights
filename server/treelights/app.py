@@ -959,6 +959,13 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
     def homeassistant_status() -> dict:
         return state.ha.status()
 
+    @app.post("/api/homeassistant/announce")
+    def homeassistant_announce() -> dict:
+        """Send the discovery configs again (Home Assistant creates the device from them)."""
+        if not state.ha.announce():
+            raise HTTPException(409, "Not connected to the MQTT broker.")
+        return state.ha.status()
+
     # ---- WebSockets ----------------------------------------------------------------------
     @app.websocket("/ws/capture")
     async def ws_capture(ws: WebSocket) -> None:

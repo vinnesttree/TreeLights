@@ -108,12 +108,31 @@ export function setupPage(): Page {
           const [cls, text] = !st.enabled ? ["unknown", "Off"]
             : st.connected ? ["ok", `Connected to ${st.broker}`]
             : st.error ? ["fail", st.error] : ["warn", `Connecting to ${st.broker ?? "?"}...`];
-          mqttStatus.replaceChildren(h("div", { class: "row" }, h("span", { class: `pill ${cls}` }, cls === "ok" ? "OK" : cls === "fail" ? "Problem" : cls === "warn" ? "Wait" : "Off"),
-            h("span", {}, text)));
+          const when = (t: number | null) => (t ? new Date(t * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }) : null);
+          mqttStatus.replaceChildren(
+            h("div", { class: "row" }, h("span", { class: `pill ${cls}` }, cls === "ok" ? "OK" : cls === "fail" ? "Problem" : cls === "warn" ? "Wait" : "Off"),
+              h("span", { class: "grow" }, text)),
+            st.connected ? h("div", { class: "small muted", style: { marginTop: "6px" } },
+              `${st.entities} entities announced to Home Assistant${st.announced_at ? ` (${when(st.announced_at)})` : ""} on ${st.discovery_prefix}/…. `,
+              st.ha_seen_at ? `Home Assistant last announced itself ${when(st.ha_seen_at)}.` : "",
+              " If the device doesn't appear under Settings → Devices & services → MQTT, see the guide below.") : "",
+            st.connected ? h("div", { class: "row", style: { marginTop: "6px" } },
+              h("button", { onclick: announce }, "Announce again")) : "",
+          );
           return st;
         } catch (e) {
           mqttStatus.replaceChildren(h("div", { class: "notice fail" }, fmtErr(e)));
           return null;
+        }
+      }
+
+      async function announce() {
+        try {
+          await api("/api/homeassistant/announce", { body: {} });
+          show("Sent to Home Assistant again.");
+          await haStatus();
+        } catch (e) {
+          show(fmtErr(e), "fail");
         }
       }
 
@@ -191,6 +210,8 @@ export function setupPage(): Page {
           h("label", {}, "Topic (change it for a second tree)"), mqttBase,
           h("label", {}, "Discovery prefix"), mqttPrefix,
           h("div", { class: "row", style: { marginTop: "10px" } }, h("button", { class: "primary", onclick: saveMqtt }, "Save")),
+          h("p", { class: "small" }, "Step-by-step setup, automations and troubleshooting: ",
+            h("a", { href: "https://github.com/vinnesttree/TreeLights/blob/main/docs/home-assistant.md", target: "_blank", rel: "noopener" }, "Home Assistant guide"), "."),
           h("p", { class: "small muted" }, "Timers for switching on at sunset and off later are on the ", h("a", { href: "#/schedule" }, "Schedule"), " page; they run on this server, with or without Home Assistant."),
         ),
         h("div", { class: "card small" },

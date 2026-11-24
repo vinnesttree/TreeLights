@@ -27,6 +27,7 @@ import json
 import logging
 import re
 import ssl
+import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -50,6 +51,25 @@ def node_id(base_topic: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "_", base_topic)
 
 
+def _refused_hint(reason: str) -> str:
+    """What to do when the broker refuses the login (paho's reason strings)."""
+    r = reason.lower()
+    if "not authori" in r or "user name or password" in r or "username or password" in r:
+        return (" Check the username and password. Home Assistant's Mosquitto add-on needs a login: use a Home "
+                "Assistant user (Settings → People → Users), or one listed in the add-on's configuration.")
+    return ""
+
+
+def _unreachable_hint(host: str) -> str:
+    if host.endswith(".local"):
+        return (" Names ending in .local often can't be resolved inside the container: enter the broker's IP "
+                "address instead (for Home Assistant's Mosquitto add-on, Home Assistant's own IP address).")
+    if host in ("127.0.0.1", "localhost"):
+        return (" 127.0.0.1 is the TreeLights host itself: enter the address of the machine running the broker "
+                "(for Home Assistant's Mosquitto add-on, Home Assistant's IP address).")
+    return " Check the address and port (1883, or 8883 with TLS), and that a firewall doesn't block it."
+
+
 def _hex(c: dict) -> str:
     return "#%02x%02x%02x" % tuple(int(min(max(float(c.get(k, 0)), 0), 255)) for k in "rgb")
 
@@ -70,6 +90,8 @@ class HomeAssistant:
         self._sent: dict[str, str] = {}  # topic -> payload last published (retained)
         self._task: asyncio.Task | None = None
         self._apply_lock = asyncio.Lock()
+        self.announced_at: float | None = None  # last time the discovery configs were sent
+        self.ha_seen_at: float | None = None  # last "online" from Home Assistant on <prefix>/status
 
     # ---- topics and payloads -----------------------------------------------------------------
     def _effects(self) -> list[tuple[str, str]]:
@@ -158,6 +180,15 @@ class HomeAssistant:
             if force or self._sent.get(topic) != payload:
                 c.publish(topic, payload, qos=1, retain=True)
                 self._sent[topic] = payload
+                if topic.endswith("/config"):
+                    self.announced_at = time.time()
+
+    def announce(self) -> bool:
+        """Send the discovery configs and states again; False if not connected."""
+        if not self.connected:
+            return False
+        self._publish(force=True)
+        return True
 
     def changed(self) -> None:
         """Something changed: publish (callable from any thread)."""
@@ -178,6 +209,7 @@ class HomeAssistant:
         try:
             if topic == f"{s.discovery_prefix}/status":
                 if payload.strip().lower() == "online":  # Home Assistant (re)started
+                    self.ha_seen_at = time.time()
                     self._publish(force=True)
                 return
             if topic == f"{b}/light/set":
@@ -226,7 +258,7 @@ class HomeAssistant:
             return
         if reason_code.is_failure:
             self.connected = False
-            self.error = f"The broker refused the connection: {reason_code}"
+            self.error = f"The broker refused the connection: {reason_code}.{_refused_hint(str(reason_code))}"
             log.warning("MQTT: %s", self.error)
             return
         s = self.settings
@@ -243,7 +275,8 @@ class HomeAssistant:
         if client is self.client:
             s = self.settings
             self.connected = False
-            self.error = f"Can't reach the MQTT broker at {s.host}:{s.port}" if s else "Can't reach the MQTT broker"
+            self.error = (f"Can't reach the MQTT broker at {s.host}:{s.port}.{_unreachable_hint(s.host)}" if s
+                          else "Can't reach the MQTT broker.")
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties) -> None:  # noqa: ANN001
         if client is self.client and self.connected:
@@ -263,7 +296,10 @@ class HomeAssistant:
         s = self.app.config.settings.mqtt
         return {"enabled": s.enabled, "configured": bool(s.host), "connected": self.connected,
                 "broker": f"{s.host}:{s.port}" if s.host else None, "error": self.error,
-                "base_topic": s.base_topic, "discovery_prefix": s.discovery_prefix}
+                "base_topic": s.base_topic, "discovery_prefix": s.discovery_prefix,
+                "announced_at": self.announced_at if self.connected else None, "ha_seen_at": self.ha_seen_at,
+                "entities": len(self._discovery(s)),
+                "device_topic": f"{s.discovery_prefix}/light/{node_id(s.base_topic)}/light/config"}
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()

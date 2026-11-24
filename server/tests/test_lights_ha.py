@@ -50,10 +50,11 @@ async def test_on_off_switches_wled_and_survives_restart(tmp_path):
         await state.lights.turn_on(params={"colors": ["#00ff00"]}, brightness=0.2)
         assert state.effect_state()["brightness"] == 0.2
         assert state.effect_state()["params"]["colors"][0] == "#00ff00"
-        # Another effect keeps the colors (as in WLED) and takes its own sliders.
+        # Another effect keeps the colors and palette (as in WLED) and takes its own sliders.
         await state.lights.turn_on(effect="palette")
         cur = state.effect_state()
         assert cur["effect"] == "palette" and cur["params"]["colors"][0] == "#00ff00" and cur["params"]["intensity"] == 40
+        assert cur["params"]["palette"] == "bulbs"
         # A restart: the new instance switches on again with the same effect.
         state.output.stop()
         state2 = AppState(tmp_path / "data", executor=concurrent.futures.ThreadPoolExecutor(1))
@@ -144,14 +145,13 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-@pytest.fixture
-def broker(tmp_path):
+def _mosquitto(tmp_path, anonymous=True):
     exe = shutil.which("mosquitto") or (shutil.which("mosquitto", path="/usr/sbin:/usr/local/sbin"))
     if not exe:
         pytest.skip("mosquitto not installed")
     port = _free_port()
     conf = tmp_path / "mosquitto.conf"
-    conf.write_text(f"listener {port} 127.0.0.1\nallow_anonymous true\npersistence false\n")
+    conf.write_text(f"listener {port} 127.0.0.1\nallow_anonymous {'true' if anonymous else 'false'}\npersistence false\n")
     proc = subprocess.Popen([exe, "-c", str(conf)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(100):
         try:
@@ -159,6 +159,20 @@ def broker(tmp_path):
             break
         except OSError:
             time.sleep(0.05)
+    return proc, port
+
+
+@pytest.fixture
+def broker(tmp_path):
+    proc, port = _mosquitto(tmp_path)
+    yield port
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture
+def broker_with_login(tmp_path):
+    proc, port = _mosquitto(tmp_path, anonymous=False)
     yield port
     proc.terminate()
     proc.wait(timeout=5)
@@ -210,7 +224,14 @@ async def test_home_assistant_discovery_and_commands(tmp_path, broker):
         assert cfg["command_topic"] == "tree1/light/set" and cfg["device"]["identifiers"] == ["tree1"]
         assert json.loads(ha.msgs["tree1/light/state"])["state"] == "OFF"
         assert ha.msgs["tree1/next_timer/state"].endswith("17:00:00+00:00")
-        assert state.ha.status()["connected"]
+        st = state.ha.status()
+        assert st["connected"] and st["announced_at"] and st["entities"] == 6
+        assert st["device_topic"] == light_cfg
+        # "Announce again" sends the discovery configs once more.
+        ha.msgs.pop(light_cfg)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(state)), base_url="http://t") as http:
+            assert (await http.post("/api/homeassistant/announce")).status_code == 200
+        assert await ha.wait(lambda m: light_cfg in m)
 
         # On, with an effect (by its label), a color and brightness.
         ha.send("tree1/light/set", json.dumps({"state": "ON", "effect": "Helix 3D", "brightness": 51,
@@ -264,6 +285,22 @@ async def test_home_assistant_reports_an_unreachable_broker(tmp_path):
             await asyncio.sleep(0.05)
         st = state.ha.status()
         assert not st["connected"] and "Can't reach" in st["error"]
+    finally:
+        await state.ha.stop()
+        state.output.stop()
+
+
+async def test_home_assistant_explains_a_refused_login(tmp_path, broker_with_login):
+    state = AppState(tmp_path / "data", executor=concurrent.futures.ThreadPoolExecutor(1))
+    state.config.update({"mqtt": {"enabled": True, "host": "127.0.0.1", "port": broker_with_login}})
+    try:
+        await state.ha.start()
+        for _ in range(100):
+            if state.ha.status()["error"]:
+                break
+            await asyncio.sleep(0.05)
+        st = state.ha.status()
+        assert not st["connected"] and "refused" in st["error"] and "username and password" in st["error"]
     finally:
         await state.ha.stop()
         state.output.stop()
