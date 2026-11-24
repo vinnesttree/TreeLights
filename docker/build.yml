@@ -1,0 +1,10 @@
+# Add-on for docker/docker-compose.yml: build the image from this clone instead of pulling
+# it (to try changes, or a branch). From the repository root:
+#   docker compose -f docker/docker-compose.yml -f docker/build.yml up -d --build
+services:
+  treelights:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: treelights:local
+    pull_policy: build

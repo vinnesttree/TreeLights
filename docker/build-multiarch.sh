@@ -7,8 +7,10 @@
 #
 # Building for the other architecture needs QEMU emulation once per host:
 #   docker run --privileged --rm tonistiigi/binfmt --install arm64,amd64
-# On the Raspberry Pi itself, plain `docker compose -f docker/docker-compose.yml up -d --build`
-# builds the arm64 image natively; every Python dependency has a prebuilt aarch64 wheel.
+# Normally not needed: GitHub builds and publishes both (ghcr.io/vinnesttree/treelights,
+# .github/workflows/image.yml). On a Raspberry Pi,
+# `docker compose -f docker/docker-compose.yml -f docker/build.yml up -d --build` builds the
+# arm64 image natively; every Python dependency has a prebuilt aarch64 wheel.
 set -e
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 if [ "$1" = "--push" ]; then

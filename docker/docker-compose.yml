@@ -1,17 +1,26 @@
-# Run from the repository root:  docker compose -f docker/docker-compose.yml up -d --build
+# TreeLights with plain Docker Compose. Uses the ready-built image that GitHub builds from
+# main (amd64 and arm64), so this one file is all you need:
+#
+#   docker compose up -d              # in the folder with this file (named compose.yaml or
+#                                     # docker-compose.yml), or: docker compose -f <file> up -d
+#   docker compose logs treelights    # shows the URL and a QR code
+#
+# Updating: `docker compose up -d` again (pull_policy: always fetches the latest image).
+# To stay on a release, use e.g. ghcr.io/vinnesttree/treelights:0.1.0 below.
+# To build from a clone of the repository instead (from the repository root):
+#   docker compose -f docker/docker-compose.yml -f docker/build.yml up -d --build
 services:
   treelights:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    image: treelights:0.1.0
+    image: ghcr.io/vinnesttree/treelights:latest
+    pull_policy: always
+    container_name: treelights
     # Host networking (Linux): needed for mDNS discovery of WLED. The app listens on
     # the host's ports directly: HTTPS_PORT (default 8443) and HTTP_PORT (plain-HTTP
-    # setup page, default 8080). Set them in a .env file in docker/ or edit the defaults.
+    # setup page, default 8080). Set them in a .env file next to this file, or edit the defaults.
     network_mode: host
     restart: unless-stopped
     volumes:
-      - ./data:/data
+      - ./data:/data  # config, certificates, scans and maps, next to this file
     environment:
       TREELIGHTS_DATA: /data
       TREELIGHTS_HTTPS_PORT: ${HTTPS_PORT:-8443}

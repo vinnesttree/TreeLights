@@ -17,24 +17,42 @@ The design, including a failure analysis and how each failure is handled, is in 
 
 ## Install
 
+TreeLights runs as one Docker container on a Linux computer that is on the same network as the WLED controller and the phone: a home server, a NAS or a Raspberry Pi 4/5. You don't build anything. GitHub builds a ready-to-run image from `main`, `ghcr.io/vinnesttree/treelights:latest`, for PCs (amd64) and Raspberry Pi (arm64), and Docker picks the right one.
+
+### 1. Prepare the host
+
+- **Docker with the Compose plugin.** `docker compose version` should print a version. If it doesn't, install Docker Engine for your distribution ([docs.docker.com/engine/install](https://docs.docker.com/engine/install/)).
+- **Host networking needs Linux.** The container uses the host's network directly, which finding WLED on the network (mDNS) needs. Docker Desktop on Windows or macOS won't work.
+- **Firewall:** if the host runs one, allow from the LAN:
+  - TCP **8443** (the app);
+  - TCP **8080** (the setup page);
+  - UDP **5353** (finding WLED).
+
+  With `ufw`, for example: `sudo ufw allow 8443/tcp && sudo ufw allow 8080/tcp && sudo ufw allow 5353/udp`.
+
+### 2. Start TreeLights
+
+Choose one: plain Docker Compose (2a) or Dockge (2b).
+
+#### 2a. With Docker Compose
+
 ```sh
-git clone <this repository> treelights && cd treelights
-docker compose -f docker/docker-compose.yml up -d --build
-docker compose -f docker/docker-compose.yml logs treelights   # shows the URL and a QR code
+mkdir -p ~/treelights && cd ~/treelights
+curl -fsSL https://raw.githubusercontent.com/vinnesttree/TreeLights/main/docker/docker-compose.yml -o compose.yaml
+docker compose up -d
+docker compose logs treelights   # shows the URL and a QR code
 ```
 
-- **Raspberry Pi 4/5 (arm64):** the same commands build natively on the Pi. To build both architectures elsewhere, use `docker/build-multiarch.sh` (needs Docker buildx with QEMU emulation).
-- The app listens on **https://&lt;host&gt;:8443**. A plain-HTTP setup page with a QR code and help is on **http://&lt;host&gt;:8080**.
-- **Other ports:** set `HTTPS_PORT` and `HTTP_PORT`, in a `.env` file next to the compose file or in the environment when running `docker compose`. Without Docker, use `--https-port` / `--http-port`, or `TREELIGHTS_HTTPS_PORT` / `TREELIGHTS_HTTP_PORT`.
-- Data is kept in `docker/data/`: config, certificates, scans and maps.
-- **Firewall:** if the host runs one, allow TCP 8443 and 8080 from the LAN, and UDP 5353 for mDNS discovery.
-- **Certificate warning:** Chrome warns about the certificate because it comes from a local authority the container creates.
-  - Tap **Advanced → Proceed**. Chrome asks when the page is opened, never per camera frame.
-  - To get rid of the warning entirely, install the CA certificate from the setup page on the phone. This is optional.
+- **Data** (config, certificates, scans and maps) is kept in `~/treelights/data`. Back up that folder to keep your maps.
+- **Other ports:** create a `.env` file next to `compose.yaml` before `docker compose up -d`:
+  ```sh
+  printf 'HTTPS_PORT=9443\nHTTP_PORT=9080\n' > .env
+  ```
+  Without Docker, use `--https-port` / `--http-port`, or `TREELIGHTS_HTTPS_PORT` / `TREELIGHTS_HTTP_PORT`.
 
-### Running with Dockge
+#### 2b. With Dockge
 
-[`deploy/dockge/compose.yaml`](deploy/dockge/compose.yaml) is a complete stack. It pulls the ready-built image `ghcr.io/vinnesttree/treelights:latest`, which GitHub builds from `main` on every push (for amd64 and arm64), so nothing needs cloning or building on the server.
+[`deploy/dockge/compose.yaml`](deploy/dockge/compose.yaml) is a complete stack that pulls the same image.
 
 1. **Install Dockge** if you don't have it (from Dockge's README):
    ```sh
@@ -47,17 +65,48 @@ docker compose -f docker/docker-compose.yml logs treelights   # shows the URL an
    - **Choose the ports** before deploying: in the file, change the numbers in `${HTTPS_PORT:-8443}` (the app) and `${HTTP_PORT:-8080}` (the setup page), for example to `${HTTPS_PORT:-9443}` and `${HTTP_PORT:-9080}`. Or set `HTTPS_PORT=9443` and `HTTP_PORT=9080` in a `.env` file next to the compose file.
    - Alternatively, save the file as `/opt/stacks/treelights/compose.yaml` and choose **Scan Stacks Folder** from the menu at the top right.
 3. **Deploy.** Dockge pulls the image (a few hundred MB the first time), then shows the container's health.
-4. **Open it.** The setup page is at **http://&lt;host&gt;:&lt;HTTP_PORT&gt;** (QR code and help), and the app is at **https://&lt;host&gt;:&lt;HTTPS_PORT&gt;** (8080 and 8443 unless changed). Continue with *WLED settings* and *Mapping the tree* below.
+4. **Data** is kept next to the stack's compose file, in `/opt/stacks/treelights/data`. Back up that folder to keep your maps.
 
-**Notes:**
-- **Data** is stored next to the stack's compose file, in `/opt/stacks/treelights/data`: config, certificates, scans and maps. Back up that folder to keep your maps.
-- **Updating:** redeploy the stack. Because of `pull_policy: always`, every `docker compose up` fetches the latest image. GitHub builds a new one a few minutes after each push to `main` (*Actions* tab, *Container image*).
-  - To stay on a release, use its tag instead of `latest`, for example `ghcr.io/vinnesttree/treelights:0.1.0`.
-  - To build on the server instead, for example to try a branch, the file has the lines to swap in.
-- **"denied" or "unauthorized" when pulling:** GitHub publishes a new image as private at first. Make it public once: on GitHub, open the repository's *Packages* → *treelights* → *Package settings* → *Change visibility* → *Public*.
-- **No `ports:` section.** The stack uses host networking, which mDNS discovery of WLED needs, so the app listens directly on the host's `HTTPS_PORT` and `HTTP_PORT`. Pick ports nothing else on the host uses: if one is taken, the container log names the port and how to change it. Allow both through the firewall from the LAN, plus UDP 5353. Host networking needs a Linux Docker host.
-- **Raspberry Pi 4/5:** the image is published for arm64 too; the same stack works.
-- **Phone can't connect** (several network interfaces or a VPN on the host): uncomment `TREELIGHTS_HOST_IPS` in the file, set it to the host's LAN address, and redeploy.
+**A stack set up before the image existed** builds from a GitHub branch, so its file has a `build:` section. Change it:
+1. Open the stack in Dockge and click **Edit**.
+2. Replace the `build:` section and the `image:` and `pull_policy:` lines under it with:
+   ```yaml
+       image: ghcr.io/vinnesttree/treelights:latest
+       pull_policy: always
+   ```
+3. **Save** and **Deploy**. The data folder stays as it is.
+
+### 3. Open it on the phone
+
+1. On the phone, open **http://&lt;host&gt;:8080** (or your `HTTP_PORT`), or scan the QR code from the container log. This is the setup page.
+2. Follow its link to the app at **https://&lt;host&gt;:8443** (or your `HTTPS_PORT`). The camera needs HTTPS.
+3. Chrome warns about the certificate, because it comes from a local authority the container creates.
+   - Tap **Advanced → Proceed**. Chrome asks when the page is opened, never per camera frame.
+   - To get rid of the warning entirely, install the CA certificate from the setup page on the phone. This is optional.
+4. **Phone can't connect** (several network interfaces or a VPN on the host): set `TREELIGHTS_HOST_IPS` in the compose file to the host's LAN address (the line is there, commented out), and redeploy.
+
+Then continue with *WLED settings* and *Mapping the tree* below.
+
+### Updating
+
+- **Docker Compose:** `docker compose up -d` in the folder. Because of `pull_policy: always`, it fetches the latest image every time.
+- **Dockge:** redeploy the stack.
+- **When a new image is ready:** GitHub builds one a few minutes after each change to `main`. The repository's *Actions* tab shows when *Container image* has finished.
+- **To stay on a release** instead of following `main`, use its version in place of `latest`, for example `ghcr.io/vinnesttree/treelights:0.1.0`.
+- **"denied" or "unauthorized" when pulling:** the image's package on GitHub must be public. Open the repository's *Packages* → *treelights* → *Package settings* → *Change visibility* → *Public*.
+
+### Building from source (optional)
+
+To try changes or a branch, build the image from a clone instead of pulling it:
+
+```sh
+git clone https://github.com/vinnesttree/TreeLights.git treelights && cd treelights
+docker compose -f docker/docker-compose.yml -f docker/build.yml up -d --build
+```
+
+- `docker/build.yml` swaps the pulled image for a local build. The data folder is then `docker/data/`.
+- On a Raspberry Pi this builds natively. To build both architectures on another machine, use `docker/build-multiarch.sh` (needs Docker buildx with QEMU emulation).
+- In Dockge, the stack file has the lines for building from a branch instead (commented out).
 
 ## WLED settings
 
@@ -171,13 +220,16 @@ Layout:
   - `effects/`
   - `sim/`: simulator and rig
 - `web/`: Vite + TypeScript + three.js
-- `docker/`
+- `docker/`: Dockerfile, `docker-compose.yml` (pulls the published image), `build.yml` (builds it instead)
+- `.github/workflows/image.yml`: builds and publishes the image
 
 ## Troubleshooting
 
 | Symptom | What to check |
 |---|---|
 | Camera page says it needs HTTPS | Open the `https://…` address on the app port (8443 unless changed), not `http://`. |
+| Pulling the image fails with "denied", "unauthorized" or "not found" | Check the image name: `ghcr.io/vinnesttree/treelights:latest`. If it's right, the package on GitHub isn't public yet: *Packages* → *treelights* → *Package settings* → *Change visibility* → *Public*. |
+| A change on `main` doesn't show after redeploying | GitHub builds the image a few minutes after the change. Check the *Actions* tab (*Container image*), then redeploy again. |
 | Container restarts; log says a port "is already in use" | Another service on the host uses that port. Set `HTTPS_PORT` / `HTTP_PORT` to free ports and redeploy. |
 | Scan: "the blinking pattern isn't being picked up" | Point the camera at the tree and dim other lights. Check the Setup page's realtime check. |
 | Scan: few LEDs identified on one side | Walk that side again more slowly, or start a new scan. LEDs hidden from every side are placed from the wiring and marked *estimated*. |

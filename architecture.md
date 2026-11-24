@@ -246,7 +246,8 @@ While the server holds the output, it polls `/json/info` about every 3 s:
   - runtime libraries: FastAPI/uvicorn, numpy, scipy, opencv-python-headless, zeroconf, PyAV (video decoding) and cryptography;
   - dependencies pinned in a lock file;
   - images for amd64 and arm64 (for example a Raspberry Pi 4 or 5):
-    - on the Pi, `docker compose up --build` builds natively;
+    - GitHub Actions builds both and publishes `ghcr.io/vinnesttree/treelights` (`:latest` from `main`, `:<version>` from release tags); the compose files pull it;
+    - on the Pi, `docker compose ... -f docker/build.yml up --build` builds natively;
     - `docker/build-multiarch.sh` builds both with buildx, where QEMU emulation is set up;
     - every pinned Python dependency has a prebuilt aarch64 wheel for Python 3.12 (checked), so nothing compiles on the Pi;
     - both base images publish `linux/arm64`;
@@ -1000,7 +1001,7 @@ web/                 Vite + TypeScript + three.js
 server/treelights/sim/  synthetic tree, scene renderer, virtual WLED, virtual phone, synthetic videos, simulated rig
 server/treelights/camcal.py  optional ChArUco camera calibration
 tests/
-docker/              Dockerfile, docker-compose.yml
+docker/              Dockerfile, docker-compose.yml (pulls the published image), build.yml (build instead)
 ```
 
 **API (sketch):**
