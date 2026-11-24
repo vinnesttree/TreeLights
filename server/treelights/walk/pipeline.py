@@ -198,10 +198,19 @@ def video_phone_times(video_t: np.ndarray, video_timing: Timing, live: SourceRes
     if live is None or not live.timing.ok or not video_timing.ok:
         return guess
     pt = video_timing.pattern_time(video_t)
-    base = live.timing.source_time(pt)
-    # Pattern timelines agree modulo one cycle: pick the cycle shift closest to the guess.
-    m = np.round((guess - base) / CYCLE_T)
-    m = np.median(m) if rec_start is not None else 0.0
+    # Both timelines run with the LED pattern, but they agree only modulo whole cycles. The
+    # cycle shift is chosen on the pattern timeline: where the live stream's pattern time
+    # was at the guessed phone time. (It used to be chosen on the phone clock, comparing the
+    # guess with source_time(pt). With the live timing's drift fit b, source_time scales
+    # times by 1 / (1 - b): with phone clocks near 1.8e9 s, as real phones' are, a drift
+    # of 85 ppm put a real walk's recording 42 hours from its live frames.)
+    if rec_start is None:
+        # No recording start: centre the recording on the live frames.
+        lt = live.frame_t
+        target = 0.5 * (lt.min() + lt.max()) + (video_t - 0.5 * (video_t.min() + video_t.max()))
+    else:
+        target = guess
+    m = float(np.median(np.round((live.timing.pattern_time(target) - pt) / CYCLE_T)))
     return live.timing.source_time(pt + m * CYCLE_T)
 
 

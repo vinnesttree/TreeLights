@@ -307,6 +307,15 @@ def run(data: Path, scan_id: str | None, vid: str | None, variants: list[str], u
         _say(f"  LEDs decoded (either source): {len(dec)} of {n}; keyframes {len(obs)}; per keyframe (median): "
              f"identified {np.median(ident) if ident else 0:.0f}, usable for the cameras {np.median(unamb) if unamb else 0:.0f}")
         for r in wr.results:
+            if r.log_shift:
+                _say(f"  {r.source.name}: orientation log moved by {r.log_shift:+.2f} s to line up with the frames")
+            cal = {k: v for k, v in r.gyro_cal.items() if k != "tracking"}
+            if cal:
+                _say(f"  {r.source.name}: gyro calibration " + ", ".join(
+                    f"{k} {v:.3g}" if isinstance(v, float) else f"{k} {v}" for k, v in cal.items()))
+        for note in wr.notes:
+            _say(f"  note: {note}")
+        for r in wr.results:
             pt = r.source.phone_t if r.source.phone_t is not None else r.frame_t
             _say(f"  {r.source.name} frames on the phone clock: {np.min(pt):.1f} .. {np.max(pt):.1f}")
         kf = {}

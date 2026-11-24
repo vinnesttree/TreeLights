@@ -265,3 +265,35 @@ def test_motion_log_on_another_clock_is_lined_up():
     log_t = log_t + 1795397020.0 + 190252.2  # on another clock
     off = motion_log_offset(rows, frame_t, log_t, log_q, w, h)
     assert abs(off - (-190252.2)) < 0.06
+
+
+def test_recording_lands_on_the_live_frames_with_a_real_phone_clock():
+    """Phone clocks are near 1.8e9 s. With the live stream's timing drift fit at 85 ppm, the
+    recording's frames were put 42 hours from the live frames (2 keyframes over a 5.5 minute
+    walk). They must land on the phone clock where they were taken, with or without the
+    recording's start time."""
+    from treelights.walk.pipeline import Source, SourceResult, video_phone_times
+    from treelights.walk.timing import Timing
+    from treelights.walk.tracking import TrackSet
+
+    t0 = 1795397020.0  # phone clock when the walk started
+    b = 8.5e-5  # drift between the phone's clock and the LED pattern
+    live_t = t0 + np.arange(0, 330, 0.134)
+    # Live timing: pattern_time = t - (a + b t), with the pattern's zero somewhere before the walk.
+    a = -b * t0 + 1.234 - 50 * CYCLE_T
+    live_timing = Timing(a, b, 0.1, 40, True)
+    live = SourceResult(Source("live", [Frame(float(t), np.zeros((0, 6))) for t in live_t], 720, 1280, live_t),
+                        live_timing, TrackSet(np.zeros((0, 7)), 0, np.zeros((len(live_t), 2))), {}, None)
+    rec_start = t0 + 0.35
+    video_t = np.arange(0, 330, 1 / 30)
+    true_phone = rec_start + video_t
+    # The recording's own timing starts near 0 (its frame times do): its pattern time is the
+    # live one's minus a huge whole number of cycles.
+    k = np.round(live_timing.pattern_time(rec_start) / CYCLE_T)
+    video_pattern = live_timing.pattern_time(true_phone) - k * CYCLE_T
+    vb = 2e-5
+    va = float(np.mean(video_t * (1 - vb) - video_pattern))
+    video_timing = Timing(va, vb, 0.1, 40, True)
+    for rs in (rec_start, None):
+        got = video_phone_times(video_t, video_timing, live, rs)
+        assert np.abs(got - true_phone).max() < 0.05, (rs, float(np.abs(got - true_phone).max()))
