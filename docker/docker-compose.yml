@@ -27,3 +27,5 @@ services:
       TREELIGHTS_HTTP_PORT: ${HTTP_PORT:-8080}
       # Uncomment if the host's LAN address isn't detected automatically:
       # TREELIGHTS_HOST_IPS: 192.168.1.20
+      # Time zone for the timers, if not set on the Schedule page:
+      # TZ: Europe/Berlin

@@ -890,6 +890,26 @@ Use the same flow when the tree has settled or been bumped.
   - Each frame's current draw is estimated from its RGB values, using a configurable mA per channel.
   - Brightness is scaled down to stay within WLED's configured limit (from `/json/info`), or a limit set in Setup.
 
+### 12.1 On/off, timers and Home Assistant
+
+*Added after draft 4.*
+
+- **One light** (`lights.py`). The tree is one light that is on or off.
+  - *On* runs a library effect under the output lease (`test` kind). Its parameters and brightness are remembered in `lights.json`.
+  - *Off* releases the lease and sets WLED's own `on` to false. Releasing alone would show WLED's own effect.
+  - Captures take priority: switching while a `calibration` or `identify` lease is held is refused, never pre-empting a scan.
+  - The effect's lease (TTL 1 h) is renewed every 30 s while on. Before this, effects stopped after an hour.
+  - The on state survives a restart.
+- **Timers** (`schedule.py`, `sun.py`).
+  - Fixed local times or sunrise/sunset ± minutes, per weekday, in an IANA time zone.
+  - Sun times use NOAA's solar equations (within a minute between the polar circles). No sun event that day means no firing.
+  - Event times are computed per local date and compared in UTC, so DST changes neither skip nor repeat a timer.
+  - Each check applies only the last event since the previous check. At start-up, the window starts at the last on/off change (at most 24 h back), so a timer missed while the server was down still takes effect, but a later manual change wins.
+- **Home Assistant** (`homeassistant.py`): MQTT discovery through paho-mqtt.
+  - Entities: a JSON-schema light (brightness, effect list, RGB = Color 1), a palette select, speed and intensity numbers, a schedule switch and a next-timer sensor.
+  - States are retained, and published on every change and every 15 s. A last-will marks the device offline.
+  - Everything is announced again when Home Assistant publishes `online` on `<prefix>/status`.
+
 ## 13. Storage
 
 ```
@@ -975,6 +995,8 @@ The web app is phone-first, built with TypeScript, Vite and three.js, and served
 | Camera calibration | Optional: the ChArUco board, shown on a monitor, and the capture, done on the phone. |
 | Map | 3D review, quality report, editing, re-scan, versions, activation, export. |
 | Test | Sweep test, status colors, identify LED, brightness. |
+| Effects | The effect library, WLED-style sliders, colors and palettes, live 3D preview. |
+| Schedule | Switch the lights on and off; timers at set times or relative to sunrise and sunset; time zone and location. |
 
 ## 16. Server layout and API
 
@@ -1019,6 +1041,7 @@ docker/              Dockerfile, docker-compose.yml (pulls the published image),
 - **Re-scan (§11.5):** `GET /api/maps/{map}/rescan` (the low-confidence LEDs), `POST /api/maps/{map}/rescan {leds | text | low_confidence}`, `POST /api/leds/show {leds}`; the tripod view starts with `start_view {mode: "rescan"}` on `/ws/control`.
 - **Test animation:** `POST /api/test/start`, `POST /api/test/stop`, and `WSS /ws/preview` (live colors for the 3D view)
 - **Camera calibration:** `POST /api/camera-profiles`
+- **Lights and timers:** `GET`/`POST /api/lights {on, effect?, params?, brightness?}`, `GET`/`PUT /api/schedule`, `GET /api/homeassistant`
 
 ## 17. Testing
 

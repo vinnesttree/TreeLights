@@ -13,6 +13,16 @@ export function setupPage(): Page {
       const ledInput = h("input", { type: "number", min: "1", max: "4096" }) as HTMLInputElement;
       const powerInput = h("input", { type: "number", min: "0", step: "100", placeholder: "use WLED's limit" }) as HTMLInputElement;
       const thorough = h("input", { type: "checkbox" }) as HTMLInputElement;
+      // Home Assistant (MQTT)
+      const mqttOn = h("input", { type: "checkbox" }) as HTMLInputElement;
+      const mqttHost = h("input", { placeholder: "192.168.1.10 or homeassistant.local", inputmode: "url" }) as HTMLInputElement;
+      const mqttPort = h("input", { type: "number", min: "1", max: "65535", value: "1883" }) as HTMLInputElement;
+      const mqttUser = h("input", { autocomplete: "off" }) as HTMLInputElement;
+      const mqttPass = h("input", { type: "password", autocomplete: "new-password" }) as HTMLInputElement;
+      const mqttTls = h("input", { type: "checkbox" }) as HTMLInputElement;
+      const mqttBase = h("input", { value: "treelights" }) as HTMLInputElement;
+      const mqttPrefix = h("input", { value: "homeassistant" }) as HTMLInputElement;
+      const mqttStatus = h("div");
 
       const show = (text: string, cls = "ok") => msg.replaceChildren(h("div", { class: `notice ${cls}` }, text));
 
@@ -23,6 +33,16 @@ export function setupPage(): Page {
         ledInput.value = String(cfg.wled.led_count);
         powerInput.value = cfg.power.max_current_ma ?? "";
         thorough.checked = !!cfg.capture.thorough;
+        mqttOn.checked = !!cfg.mqtt.enabled;
+        mqttHost.value = cfg.mqtt.host ?? "";
+        mqttPort.value = String(cfg.mqtt.port);
+        mqttUser.value = cfg.mqtt.username ?? "";
+        mqttPass.value = "";
+        mqttPass.placeholder = cfg.mqtt.password ? "saved (type to change)" : "";
+        mqttTls.checked = !!cfg.mqtt.tls;
+        mqttBase.value = cfg.mqtt.base_topic;
+        mqttPrefix.value = cfg.mqtt.discovery_prefix;
+        await haStatus();
         if (st.wled.host) checksBox.replaceChildren(h("span", { class: "muted" }, `Selected: ${st.wled.host}. Run the checks.`));
       }
 
@@ -82,6 +102,43 @@ export function setupPage(): Page {
         }
       }
 
+      async function haStatus() {
+        try {
+          const st = await api("/api/homeassistant");
+          const [cls, text] = !st.enabled ? ["unknown", "Off"]
+            : st.connected ? ["ok", `Connected to ${st.broker}`]
+            : st.error ? ["fail", st.error] : ["warn", `Connecting to ${st.broker ?? "?"}...`];
+          mqttStatus.replaceChildren(h("div", { class: "row" }, h("span", { class: `pill ${cls}` }, cls === "ok" ? "OK" : cls === "fail" ? "Problem" : cls === "warn" ? "Wait" : "Off"),
+            h("span", {}, text)));
+          return st;
+        } catch (e) {
+          mqttStatus.replaceChildren(h("div", { class: "notice fail" }, fmtErr(e)));
+          return null;
+        }
+      }
+
+      async function saveMqtt() {
+        const mqtt: any = {
+          enabled: mqttOn.checked, host: mqttHost.value.trim() || null, port: Number(mqttPort.value) || 1883,
+          username: mqttUser.value.trim() || null, tls: mqttTls.checked,
+          base_topic: mqttBase.value.trim(), discovery_prefix: mqttPrefix.value.trim(),
+        };
+        if (mqttPass.value) mqtt.password = mqttPass.value;
+        else if (!mqtt.username) mqtt.password = null;
+        try {
+          await api("/api/config", { method: "PUT", body: { mqtt } });
+          mqttPass.value = "";
+          show(mqtt.enabled ? "Saved. Connecting to the broker..." : "Saved. Home Assistant integration is off.");
+          for (let i = 0; i < 6; i++) {
+            const st = await haStatus();
+            if (!st || !st.enabled || st.connected || st.error) break;
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+        } catch (e) {
+          show(fmtErr(e), "fail");
+        }
+      }
+
       async function chase() {
         try {
           await api("/api/test/start", { body: { effect: "chase", brightness: 0.4 } });
@@ -120,6 +177,21 @@ export function setupPage(): Page {
           powerInput,
           h("label", {}, h("span", { class: "row" }, thorough, "Thorough capture: also try every LED the binary pass missed (slower)")),
           h("div", { class: "row", style: { marginTop: "10px" } }, h("button", { class: "primary", onclick: save }, "Save")),
+        ),
+        h("div", { class: "card" },
+          h("h2", {}, "Home Assistant"),
+          h("p", { class: "small muted" }, "Through an MQTT broker (for example Home Assistant's Mosquitto add-on, with the MQTT integration set up). The tree then appears in Home Assistant by itself, as a light with effects and brightness, plus palette, speed, a switch for the timers and the next timer."),
+          mqttStatus,
+          h("label", {}, h("span", { class: "row" }, mqttOn, "Connect to Home Assistant")),
+          h("label", {}, "Broker address"), mqttHost,
+          h("label", {}, "Port"), mqttPort,
+          h("label", {}, "Username"), mqttUser,
+          h("label", {}, "Password"), mqttPass,
+          h("label", {}, h("span", { class: "row" }, mqttTls, "TLS (usually port 8883)")),
+          h("label", {}, "Topic (change it for a second tree)"), mqttBase,
+          h("label", {}, "Discovery prefix"), mqttPrefix,
+          h("div", { class: "row", style: { marginTop: "10px" } }, h("button", { class: "primary", onclick: saveMqtt }, "Save")),
+          h("p", { class: "small muted" }, "Timers for switching on at sunset and off later are on the ", h("a", { href: "#/schedule" }, "Schedule"), " page; they run on this server, with or without Home Assistant."),
         ),
         h("div", { class: "card small" },
           h("h2", {}, "Camera calibration (optional)"),
