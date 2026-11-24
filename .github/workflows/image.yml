@@ -1,0 +1,54 @@
+# Builds the TreeLights image and publishes it to GitHub's container registry, so servers
+# pull it instead of building it (deploy/dockge/compose.yaml uses it).
+#
+#   ghcr.io/vinnesttree/treelights:latest   the latest commit on main
+#   ghcr.io/vinnesttree/treelights:0.1.0    a release tag v0.1.0
+#   ghcr.io/vinnesttree/treelights:sha-...  any build, by commit
+#
+# For amd64 (PCs, most servers) and arm64 (Raspberry Pi 4/5); Docker pulls the right one.
+name: Container image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3  # arm64 on an amd64 runner
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/treelights
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

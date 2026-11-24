@@ -1,8 +1,8 @@
 # TreeLights stack for Dockge (or plain `docker compose up -d` in this folder).
 #
-# Docker builds the image straight from the GitHub repository, so this file is all
-# the stack needs: no clone. The first deploy takes a few minutes (it builds the web
-# app and installs the Python packages); later ones reuse the build cache.
+# The image is built by GitHub (.github/workflows/image.yml) on every push to main and
+# pulled from GitHub's container registry, so this file is all the stack needs: no
+# clone and no building on the server. It runs on amd64 and arm64 (Raspberry Pi 4/5).
 #
 # PORTS: set HTTPS_PORT and HTTP_PORT below (change the number after ":-"), or in a
 # .env file next to this file:
@@ -11,20 +11,23 @@
 # The stack uses host networking, so these are the ports on the host itself; pick
 # ones nothing else on the host uses. If a port is taken, the container log says so.
 #
-# Updating: `pull_policy: build` makes every `docker compose up` rebuild from the
-# latest commit of the branch below, so redeploying the stack (in Dockge, or
-# `docker compose up -d` in this folder) updates it.
+# Updating: `pull_policy: always` makes every `docker compose up` fetch the latest image,
+# so redeploying the stack (in Dockge, or `docker compose up -d` in this folder)
+# updates it. To stay on a release instead, use e.g. ghcr.io/vinnesttree/treelights:0.1.0.
 #
 # Data (config, certificates, scans, maps) is kept next to this file in ./data,
 # e.g. /opt/stacks/treelights/data.
 services:
   treelights:
-    build:
-      # <repository>#<branch>. Change the branch to "main" once the work is merged there.
-      context: https://github.com/vinnesttree/TreeLights.git#ccr-8f206c85-x6h39j
-      dockerfile: docker/Dockerfile
-    image: treelights:local
-    pull_policy: build
+    image: ghcr.io/vinnesttree/treelights:latest
+    pull_policy: always
+    # To build on the server from the repository instead (slower; e.g. to try a branch),
+    # replace the two lines above with:
+    #   build:
+    #     context: https://github.com/vinnesttree/TreeLights.git#main
+    #     dockerfile: docker/Dockerfile
+    #   image: treelights:local
+    #   pull_policy: build
     container_name: treelights
     # Host networking (Linux hosts): needed for mDNS discovery of WLED and for sending
     # DDP to it. No `ports:` section: the app listens on the host's ports directly.

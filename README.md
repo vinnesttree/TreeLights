@@ -34,7 +34,7 @@ docker compose -f docker/docker-compose.yml logs treelights   # shows the URL an
 
 ### Running with Dockge
 
-[`deploy/dockge/compose.yaml`](deploy/dockge/compose.yaml) is a complete stack: Docker builds the image straight from this GitHub repository, so nothing needs cloning.
+[`deploy/dockge/compose.yaml`](deploy/dockge/compose.yaml) is a complete stack. It pulls the ready-built image `ghcr.io/vinnesttree/treelights:latest`, which GitHub builds from `main` on every push (for amd64 and arm64), so nothing needs cloning or building on the server.
 
 1. **Install Dockge** if you don't have it (from Dockge's README):
    ```sh
@@ -46,14 +46,17 @@ docker compose -f docker/docker-compose.yml logs treelights   # shows the URL an
 2. **Create the stack.** In Dockge, click **+ Compose**, name it `treelights`, and replace the editor's contents with [`deploy/dockge/compose.yaml`](deploy/dockge/compose.yaml).
    - **Choose the ports** before deploying: in the file, change the numbers in `${HTTPS_PORT:-8443}` (the app) and `${HTTP_PORT:-8080}` (the setup page), for example to `${HTTPS_PORT:-9443}` and `${HTTP_PORT:-9080}`. Or set `HTTPS_PORT=9443` and `HTTP_PORT=9080` in a `.env` file next to the compose file.
    - Alternatively, save the file as `/opt/stacks/treelights/compose.yaml` and choose **Scan Stacks Folder** from the menu at the top right.
-3. **Deploy.** The first build takes a few minutes: it builds the web app and installs the Python packages. Dockge shows the progress, then the container's health.
+3. **Deploy.** Dockge pulls the image (a few hundred MB the first time), then shows the container's health.
 4. **Open it.** The setup page is at **http://&lt;host&gt;:&lt;HTTP_PORT&gt;** (QR code and help), and the app is at **https://&lt;host&gt;:&lt;HTTPS_PORT&gt;** (8080 and 8443 unless changed). Continue with *WLED settings* and *Mapping the tree* below.
 
 **Notes:**
 - **Data** is stored next to the stack's compose file, in `/opt/stacks/treelights/data`: config, certificates, scans and maps. Back up that folder to keep your maps.
-- **Updating:** redeploy the stack. Because of `pull_policy: build`, every `docker compose up` rebuilds from the latest commit of the branch named in the file; unchanged layers come from the build cache. Once the work is merged into `main`, change `#ccr-8f206c85-x6h39j` to `#main` in the file.
+- **Updating:** redeploy the stack. Because of `pull_policy: always`, every `docker compose up` fetches the latest image. GitHub builds a new one a few minutes after each push to `main` (*Actions* tab, *Container image*).
+  - To stay on a release, use its tag instead of `latest`, for example `ghcr.io/vinnesttree/treelights:0.1.0`.
+  - To build on the server instead, for example to try a branch, the file has the lines to swap in.
+- **"denied" or "unauthorized" when pulling:** GitHub publishes a new image as private at first. Make it public once: on GitHub, open the repository's *Packages* → *treelights* → *Package settings* → *Change visibility* → *Public*.
 - **No `ports:` section.** The stack uses host networking, which mDNS discovery of WLED needs, so the app listens directly on the host's `HTTPS_PORT` and `HTTP_PORT`. Pick ports nothing else on the host uses: if one is taken, the container log names the port and how to change it. Allow both through the firewall from the LAN, plus UDP 5353. Host networking needs a Linux Docker host.
-- **Raspberry Pi 4/5:** the same stack builds natively on arm64.
+- **Raspberry Pi 4/5:** the image is published for arm64 too; the same stack works.
 - **Phone can't connect** (several network interfaces or a VPN on the host): uncomment `TREELIGHTS_HOST_IPS` in the file, set it to the host's LAN address, and redeploy.
 
 ## WLED settings
