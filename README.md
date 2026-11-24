@@ -186,7 +186,7 @@ Topics are `treelights/...` (availability `treelights/status`). Give a second tr
 - `GET`/`PUT /api/schedule` with `{"timezone": "Europe/Berlin", "latitude": 52.52, "longitude": 13.40, "timers": [{"action": "on", "trigger": "sunset", "offset_min": -15}, {"action": "off", "trigger": "time", "time": "23:00", "days": [0,1,2,3,4]}]}` (days: 0 = Monday).
 - `GET /api/homeassistant` shows the broker connection.
 
-**Advanced: tripod capture.** For a tree that can be turned, or one you can't walk around (see *Advanced* on the home page):
+**Advanced: tripod capture.** For a tree that can be turned, or one you can't walk around (the *tripod mode* link below the camera picture on the Scan page, or *Advanced* on the home page):
 1. *Camera calibration* (optional, once per phone): show the board on a computer screen and capture about 15 views.
 2. *Calibrate* on the tripod phone: start the camera, light the tree, tap *Lock camera*.
 3. For each view, turn the tree by the suggested angle (about 45°), step out of the picture and start the view from *Control* on another device (or with the 5 s countdown). Repeat for about 8 views, then *Solve map*.

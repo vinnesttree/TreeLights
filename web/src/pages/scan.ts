@@ -134,7 +134,7 @@ export function scanPage(): Page {
             h("li", {}, h("b", {}, "The upload fails: "), "the map is built from the frames sent during the walk, which works but measures fewer LEDs. Walk again on better Wi-Fi if the result is poor."),
             h("li", {}, h("b", {}, "Few LEDs found on one side: "), "walk that side again, slower and a step further away, using Re-scan on the Map page."),
             h("li", {}, h("b", {}, "Phone held very low (near the floor) or very high: "), "it works, but LEDs at the same height as the phone line up behind each other in the picture and some are missed. A second walk with the phone at a different height (Re-scan) finds them."),
-            h("li", {}, h("b", {}, "The tree is against a wall: "), "walk as far round as you can. The rest is estimated from the wiring, or use the tripod mode (Advanced, on the home page)."),
+            h("li", {}, h("b", {}, "The tree is against a wall: "), "walk as far round as you can. The rest is estimated from the wiring, or use the tripod mode (link below the camera picture)."),
           )),
       );
       const key = (sw: HTMLElement, text: string) => h("span", { class: "key" }, sw, text);
@@ -148,6 +148,8 @@ export function scanPage(): Page {
         guide,
         wrap,
         legend,
+        h("p", { class: "muted small" }, "Tree turnable, or can't be walked around? ",
+          h("a", { href: "#/calibrate" }, "Use the tripod mode instead"), "."),
         h("div", { class: "row" }, startBtn, stopBtn),
         progress,
         msg,
