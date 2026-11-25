@@ -6,7 +6,7 @@ The result is a 3D map of the tree. The map stores the wiring order, a per-LED u
 
 The design, including a failure analysis and how each failure is handled, is in [`architecture.md`](architecture.md).
 
-> **Status:** everything is built and tested in a closed-loop simulator. The simulator includes a virtual WLED reached over real DDP/UDP, a virtual phone walking around the tree over WebSockets (with hand jitter, motion blur, sensor drift and noise, dropped frames), packet loss, camera bumps, reflections and recorded videos. It has **not yet been run against a real tree, ESP32 or phone**. Expect some tuning on first use (§18 step 11 in the architecture).
+> **Status:** everything is built and tested in a closed-loop simulator. The simulator includes a virtual WLED reached over real DDP/UDP, a virtual phone walking around the tree over WebSockets (with hand jitter, motion blur, sensor drift and noise, dropped frames), packet loss, camera bumps, reflections and recorded videos. It has also been **tested on real hardware: a tree with 600 WS2811 LEDs driven by WLED**. Other strings, controllers and phones may still need some tuning on first use.
 
 ## What you need
 

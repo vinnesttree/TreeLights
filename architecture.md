@@ -1,6 +1,6 @@
 # TreeLights — Architecture
 
-**Status: DRAFT 4 — implemented.** Draft 4 makes walking around the tree with the phone the default way to capture (§7.1, §7.9). Build steps 1–10 and 12 of §18 are done and tested in simulation. Step 11, validation on your real tree, is still to do. Changes made during implementation are noted where they apply.
+**Status: DRAFT 4 — implemented.** Draft 4 makes walking around the tree with the phone the default way to capture (§7.1, §7.9). All build steps of §18 are done. Steps 1–10 and 12 are tested in simulation, and step 11, validation on a real tree, was done with 600 WS2811 LEDs driven by WLED. Changes made during implementation are noted where they apply.
 
 | Revision | Changes |
 |---|---|
@@ -1119,7 +1119,7 @@ The end-to-end test runs the real server against a virtual phone walking in real
 8. **Live reconstruction and coverage guidance;** the Map page, re-scan and export.
 9. **Sweep test animation** and the power cap.
 10. **Recorded-video mode** and the optional camera calibration.
-11. **Validation on your tree.**
+11. **Validation on your tree.** Done: tested on a real tree with 600 WS2811 LEDs driven by WLED.
 12. **Walk-around capture (draft 4):** pattern, timing, tracking, gyro self-calibration, decoding, live session and feedback, recording upload and fusion, the Scan page, and the walk simulator (§7.9, §17).
 
 ## 19. Open questions
