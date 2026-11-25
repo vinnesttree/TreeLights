@@ -1,6 +1,6 @@
 # TreeLights — Architecture
 
-**Status: DRAFT 4 — implemented.** Draft 4 makes walking around the tree with the phone the default way to capture (§7.1, §7.9). All build steps of §18 are done. Steps 1–10 and 12 are tested in simulation, and step 11, validation on a real tree, was done with 600 WS2811 LEDs driven by WLED. Changes made during implementation are noted where they apply.
+**Status: DRAFT 4 — implemented.** Draft 4 makes walking around the tree with the phone the default way to capture (§7.1, §7.9). All build steps of §18 are done. Steps 1–10 and 12 are tested in simulation. Step 11, validation on a real tree, is done: a walk-around scan of 600 WS2811 LEDs on one WLED output, with a Samsung Galaxy Z Fold7, placed 595 LEDs with high confidence and the other 5 within a few cm (§17). After draft 4, an effect library and on/off timers with Home Assistant were added (§12, §12.1). Changes made during implementation are noted where they apply.
 
 | Revision | Changes |
 |---|---|
@@ -13,7 +13,7 @@
 
 | Topic | Decision |
 |---|---|
-| Hardware | About 600 LEDs on one ESP32 running stock WLED. One frame is two DDP packets: 480 + 120 LEDs. |
+| Hardware | About 600 LEDs on one ESP32 running stock WLED. One frame is two DDP packets: 480 + 120 LEDs. Tested with 600 WS2811 LEDs on one GPIO output. |
 | Distance bound between consecutive LEDs (`d_max`) | **Dynamic.** Learned from the measurements for each link of the chain, not typed in (§10). |
 | Reference length | The tree's height, measured from the lowest light to the highest light (§9.10). |
 | Phone | Android, using the Chrome browser. No native app. |
@@ -21,7 +21,7 @@
 | HTTPS | Chrome's warning for the server's certificate is acceptable. It appears when the page is opened, never per camera frame. Installing the CA is optional. |
 | Host | Linux, Docker with host networking. |
 | Stack | Python backend (FastAPI, OpenCV, numpy, scipy). TypeScript + three.js web app. |
-| Priority | LED detection and mapping come first, and every part of detection is built. Animations: one test animation only. |
+| Priority | LED detection and mapping come first, and every part of detection is built. Draft 2 limited animations to one test animation; an effect library was added after draft 4 (§12). |
 
 ## 2. Goals, scope and principles
 
@@ -32,7 +32,8 @@
 - Produce a map that 3D effects can be built on later.
 
 **Built now:**
-- Live capture from Android Chrome, in two modes:
+- **Walk-around capture** (the default, §7.9): one walk around the tree, decoded from the uploaded recording together with the frames streamed live.
+- Tripod live capture from Android Chrome (advanced), in two modes:
   - **hybrid**: all LEDs blink binary codes at once, then the rest are lit one at a time;
   - **sequential-only**: every LED is lit one at a time.
 - Recorded-video capture, as a fallback that doesn't need live camera access in the browser.
@@ -40,10 +41,11 @@
 - Map review, editing, re-scan, versions, activation, and export (JSON, CSV).
 - Optional one-time camera calibration.
 - One test animation (a 3D sweep), plus "identify LED" (blink one LED).
+- *Added after draft 4:*
+  - an **effect library** (§12): 3D volumetric effects, surface patterns, effects inspired by Matt Parker's tree (including falling, bouncing balls and planes spinning through the tree) and basic effects, with WLED-style sliders, colors and palettes;
+  - **on/off, timers** (time of day, sunrise and sunset) and **Home Assistant** over MQTT (§12.1).
 
 **Later.** The map format and the effect interface are designed for these, but they aren't built now:
-- falling balls;
-- rotation effects that follow the tree's surface;
 - drawing from the phone;
 - WLED ledmap export;
 - multiple controllers.
@@ -229,7 +231,7 @@ While the server holds the output, it polls `/json/info` about every 3 s:
 ### 5.4 Output lease and keepalive
 
 - **One owner at a time,** in priority order: calibration > identify LED > test animation > nobody. A second client asking for the output is told it's busy.
-- **The lease is tied to the client's WebSocket heartbeat.** If the client disappears, the lease ends.
+- **Each lease has a time limit and is renewed while its owner is active:** a tripod capture with each frame received (30 s), a walk with each live frame, an effect while it runs. If the owner disappears, the lease runs out.
 - **Keepalive.** While a client holds the lease, the output thread resends the current frame every 0.5 s, whatever else is happening.
 - **Nobody holding the lease:** the server stops sending, and WLED returns to its own effects after its timeout.
 - **Restoring WLED state.** If calibration temporarily changes WLED state (for example master brightness, §7.3), the original state is saved to disk first, in `wled_restore.json` with the controller's MAC.
@@ -791,6 +793,8 @@ This step picks at most one hypothesis per LED, so that the whole chain respects
 ### 10.3 Breaks (no bound)
 
 - Boundaries between WLED outputs, read from `/json/cfg`.
+  - A break is placed before each output's start index. If outputs leave unused indices between them, those LEDs are never seen, and the break falls after the gap rather than at the end of the previous output. Number the outputs contiguously.
+  - Several outputs are tested in the simulator only; the real tree used one output.
 - Trusted links longer than 3·L.
 - Links you mark as breaks on the Map page.
 
@@ -1002,10 +1006,16 @@ The web app is phone-first, built with TypeScript, Vite and three.js, and served
 
 ```
 server/treelights/
-  app.py             FastAPI app, routes, static files
+  app.py             FastAPI app, routes, static files, worker processes for jobs
+  bootstrap.py       plain-HTTP setup page (§6.3)
   config.py          settings (/data/config.json)
-  storage/           atomic writes, append-only logs, retention
-  tls/               local CA, certificates, setup page
+  storage.py         atomic writes, append-only logs, retention
+  tls.py             local CA and certificates
+  progress.py        progress of jobs running in worker processes
+  netutil.py         local network helpers
+  lights.py          on/off and the running effect (§12.1)
+  schedule.py, sun.py  timers, sunrise and sunset
+  homeassistant.py   Home Assistant over MQTT discovery
   wled/              DDP, JSON API client, discovery, monitor, config fingerprint
   output/            lease, output thread, keepalive, renderer, power cap
   capture/           session state machines, protocol, capture plans, codes, verification
@@ -1018,29 +1028,31 @@ server/treelights/
   effects/           TreeGeometry, effect interface, test animations, palettes, noise,
                      3D volumetric effects, surface patterns, effects after Matt Parker's tree,
                      basic effects
-  workers.py         process pool and job queue
-web/                 Vite + TypeScript + three.js
-server/treelights/sim/  synthetic tree, scene renderer, virtual WLED, virtual phone, synthetic videos, simulated rig
-server/treelights/camcal.py  optional ChArUco camera calibration
-tests/
+  sim/               synthetic tree, scene renderer, virtual WLED, virtual phone, virtual walker,
+                     synthetic videos, simulated rig
+  camcal.py          optional ChArUco camera calibration
+server/tests/        unit, simulator and end-to-end tests
+server/tools/        offline reports and ablations for walks
+web/                 Vite + TypeScript + three.js; one module per page in web/src/pages/
 docker/              Dockerfile, docker-compose.yml (pulls the published image), build.yml (build instead)
 ```
 
 **API (sketch):**
 
+- **Server:** `GET /api/health`, `GET /api/state` (including who holds the output), `POST /api/auth` (the optional PIN)
 - **Config:** `GET`/`PUT /api/config`
-- **WLED:** `GET /api/wled/discover`, `GET /api/wled/checks`, `POST /api/wled/identify {index}`
-- **Output lease:** `POST`/`DELETE /api/output/lease`. The lease is also kept by the WebSocket heartbeat.
-- **Scans:** `POST /api/scans`, `GET /api/scans/{scan}`, `GET /api/scans/{scan}/coverage`, `PUT /api/scans/{scan}/overrides`
+- **WLED:** `GET /api/wled/discover`, `POST /api/wled/select`, `GET /api/wled/checks`, `POST /api/wled/identify {index}`
+- **Output lease:** no endpoint of its own. A capture, an effect or *identify* takes the output, renews it while it runs, and releases it when it ends (§5.4).
+- **Scans:** `GET`/`POST /api/scans`, `POST /api/scans/{scan}/open`, `GET /api/scans/{scan}`, `GET`/`PUT /api/scans/{scan}/overrides`
 - **Walk-around capture:** `WSS /ws/walk` (§7.9); then `PUT /api/scans/{scan}/video/{view}/upload?offset=N` (resumable) and `POST /api/scans/{scan}/walk/{view}/process`, which returns a job.
 - **Live capture (tripod):** `WSS /ws/capture`, the protocol in §7.6. Frames travel as binary messages.
-- **Video:** `POST /api/scans/{scan}/sequence/play`, and `POST /api/scans/{scan}/videos` (resumable upload)
-- **Solving:** `POST /api/scans/{scan}/solve` returns a job; `GET /api/jobs/{job}`
-- **Maps:** `GET /api/maps`, `GET /api/maps/{map}`, `POST /api/maps/{map}/activate`, `GET /api/maps/{map}/export?fmt=json|csv`
+- **Video:** `POST /api/scans/{scan}/video/play`, `GET`/`PUT /api/scans/{scan}/video/{view}/upload` (resumable), `POST /api/scans/{scan}/video/{view}/decode`
+- **Solving:** `POST /api/scans/{scan}/solve` returns a job; `GET /api/jobs`, `GET /api/jobs/{job}`
+- **Maps:** `GET /api/maps`, `GET /api/maps/active`, `GET /api/maps/{map}`, `POST /api/maps/{map}/activate`, `POST /api/maps/rollback`, `GET /api/maps/{map}/export?fmt=json|csv`
 - **Walks:** `GET /api/walks` (every walk, with its stored recording, live frames and decoded keyframes); decoding a stored walk again with the current version is the same `POST /api/scans/{scan}/walk/{view}/process` (refused with a reason once the raw data has been pruned; solving the scan again then uses the stored keyframes).
 - **Re-scan (§11.5):** `GET /api/maps/{map}/rescan` (the low-confidence LEDs), `POST /api/maps/{map}/rescan {leds | text | low_confidence}`, `POST /api/leds/show {leds}`; the tripod view starts with `start_view {mode: "rescan"}` on `/ws/control`.
-- **Test animation:** `POST /api/test/start`, `POST /api/test/stop`, and `WSS /ws/preview` (live colors for the 3D view)
-- **Camera calibration:** `POST /api/camera-profiles`
+- **Test animation and effects:** `GET /api/effects`, `POST /api/test/start {effect, params?, brightness?}`, `POST /api/effects/params`, `POST /api/test/stop`, and `WSS /ws/preview` (live colors for the 3D view)
+- **Camera calibration:** `GET /api/camcal/board.png`, `POST /api/camcal/frame`, `POST /api/camcal/solve`, `POST /api/camcal/reset`, `GET /api/camcal/profiles`
 - **Lights and timers:** `GET`/`POST /api/lights {on, effect?, params?, brightness?}`, `GET`/`PUT /api/schedule`, `GET /api/homeassistant`
 
 ## 17. Testing
@@ -1102,7 +1114,11 @@ The end-to-end test runs the real server against a virtual phone walking in real
 
 **Unit tests:** DDP encoding, the Hamming code, the walk pattern and its decoder (wrong answers never accepted under bit errors and track swaps), timing sync with drift, gyro conventions, tracking with and without the gyro, the detector on recorded frames, chain selection on hand-built chains, bound learning, gap filling, and atomic storage.
 
-**On your tree:** setup checks → one view → full scan → sweep test.
+**On a real tree** (step 11 of §18, done):
+- **Setup:** 600 WS2811 LEDs on one GPIO output of a WLED controller.
+- **Capture:** walk-around (§7.9) with a Samsung Galaxy Z Fold7 in Chrome.
+- **Result:** 595 of 600 LEDs were placed with high confidence. The other 5 were within a few cm of their true positions.
+- **Not yet tested on hardware:** several WLED outputs, tripod capture and recorded-video mode.
 
 ## 18. Build order
 
@@ -1119,7 +1135,7 @@ The end-to-end test runs the real server against a virtual phone walking in real
 8. **Live reconstruction and coverage guidance;** the Map page, re-scan and export.
 9. **Sweep test animation** and the power cap.
 10. **Recorded-video mode** and the optional camera calibration.
-11. **Validation on your tree.** Done: tested on a real tree with 600 WS2811 LEDs driven by WLED.
+11. **Validation on your tree.** Done: a walk-around scan of 600 WS2811 LEDs on one output, with a Samsung Galaxy Z Fold7 (§17).
 12. **Walk-around capture (draft 4):** pattern, timing, tracking, gyro self-calibration, decoding, live session and feedback, recording upload and fusion, the Scan page, and the walk simulator (§7.9, §17).
 
 ## 19. Open questions
