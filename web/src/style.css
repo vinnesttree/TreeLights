@@ -37,6 +37,12 @@ html, body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.
 a { color: var(--accent); }
 .topbar { display: flex; gap: 12px; align-items: center; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10; flex-wrap: wrap; }
 .brand { font-weight: 700; text-decoration: none; color: var(--text); }
+.tree-pick { width: auto; max-width: 40vw; padding: 5px 8px; font-weight: 600; }
+.ctl-row { display: grid; grid-template-columns: 1.6rem 1fr 6.5rem auto; gap: 6px 8px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.ctl-row:last-child { border-bottom: 0; }
+.ctl-row .btns { display: flex; gap: 4px; }
+.ctl-row .btns button { padding: 6px 9px; }
+@media (max-width: 520px) { .ctl-row { grid-template-columns: 1.6rem 1fr; } }
 nav { display: flex; gap: 4px; flex-wrap: wrap; }
 nav a { text-decoration: none; padding: 6px 10px; border-radius: 8px; color: var(--muted); }
 nav a.active { background: var(--bg); color: var(--text); font-weight: 600; }
