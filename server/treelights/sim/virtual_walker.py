@@ -25,7 +25,7 @@ import numpy as np
 
 from ..walk.protocol import pack_frame
 from .scene import Scene, encode_jpeg
-from .virtual_wled import VirtualWled
+from .virtual_wled import VirtualWled, VirtualWledGroup
 from .walksim import WalkConfig, Walker
 
 
@@ -164,8 +164,16 @@ async def upload(http, url: str, path: str, chunk: int = 1 << 20) -> int:  # noq
 
 
 async def run_walk_rig(server: str, n: int = 150, cfg: WalkConfig | None = None, faults=None, seed: int = 0,  # noqa: ANN001
-                       tree=None, use_video: bool = True, verbose: bool = True, workdir: str | None = None) -> dict:  # noqa: ANN001
-    """Walk once around a simulated tree against a running server; returns the map and statuses."""
+                       tree=None, use_video: bool = True, verbose: bool = True, workdir: str | None = None,  # noqa: ANN001
+                       controllers: list[int] | None = None, delays_ms: list[tuple[float, float]] | None = None,
+                       tree_id: str | None = None, mac_base: int = 0x10) -> dict:
+    """Walk once around a simulated tree against a running server; returns the map and statuses.
+
+    controllers: the tree's LEDs split over several virtual WLED controllers, with these
+    LED counts in index order (they must add up to n), each with its own network delay
+    (delays_ms[k], a uniform range in ms) to simulate timing skew between controllers.
+    The tree's wiring then has a break at each boundary, as separate strings would.
+    tree_id: the server's tree to walk (default: its default tree)."""
     import ssl
     import tempfile
 
@@ -176,15 +184,23 @@ async def run_walk_rig(server: str, n: int = 150, cfg: WalkConfig | None = None,
     from .tree import make_tree
 
     cfg = cfg or WalkConfig(duration=45.0, seed=seed)
+    if controllers and sum(controllers) != n:
+        raise ValueError("the controllers' LED counts must add up to n")
     if tree is None:
         k = (n / 600) ** 0.5 if n < 600 else 1.0
-        tree = make_tree(n=n, seed=seed, height=180 * k, base_radius=65 * k, bottom=25 * k)
+        breaks = [sum(controllers[:j]) for j in range(1, len(controllers))] if controllers else []
+        tree = make_tree(n=n, seed=seed, height=180 * k, base_radius=65 * k, bottom=25 * k, breaks_at=breaks)
     from ..reconstruction.camera import Intrinsics
 
     W, H = 960, 540
     scene = Scene(tree, width=W, height=H, intr=Intrinsics(0.78 * W, (W - 1) / 2, (H - 1) / 2, -0.03, 0.0),
                   faults=faults or Faults(), seed=seed)
-    wled = VirtualWled(n, seed=seed)
+    if controllers:
+        wled = VirtualWledGroup(controllers, seed=seed, delays_ms=delays_ms, mac_base=mac_base)
+    else:
+        wled = VirtualWled(n, seed=seed, mac=f"02:00:00:00:{mac_base:02x}:01")
+        if delays_ms:
+            wled.faults.delay_ms = tuple(delays_ms[0])
     await wled.start()
     sslctx = ssl.create_default_context()
     sslctx.check_hostname = False
@@ -193,13 +209,19 @@ async def run_walk_rig(server: str, n: int = 150, cfg: WalkConfig | None = None,
     wss_ssl = sslctx if ws_base.startswith("wss://") else None
     out: dict = {"tree": tree, "scene": scene}
     try:
-        async with httpx.AsyncClient(base_url=server, verify=False, timeout=60) as http:
-            await http.put("/api/config", json={"wled": {"host": "127.0.0.1", "http_port": wled.http_port,
-                                                          "udp_port": wled.udp_port, "led_count": n}})
-            (await http.post("/api/wled/select", json={"host": "127.0.0.1"})).raise_for_status()
+        params = {"tree": tree_id} if tree_id else None
+        ws_query = f"?tree={tree_id}" if tree_id else ""
+        async with httpx.AsyncClient(base_url=server, verify=False, timeout=60, params=params) as http:
+            if controllers:
+                (await http.put("/api/controllers", json=wled.settings())).raise_for_status()
+                out["checks"] = (await http.get("/api/wled/checks")).json()
+            else:
+                (await http.put("/api/config", json={"wled": {"host": "127.0.0.1", "http_port": wled.http_port,
+                                                               "udp_port": wled.udp_port, "led_count": n}})).raise_for_status()
+                (await http.post("/api/wled/select", json={"host": "127.0.0.1"})).raise_for_status()
             await http.put("/api/config", json={"tree_height_cm": round(float(np.ptp(tree.positions[:, 1])), 2)})
             phone = VirtualWalker(scene, wled, cfg)
-            async with websockets.connect(f"{ws_base}/ws/walk", ssl=wss_ssl, max_size=None) as ws:
+            async with websockets.connect(f"{ws_base}/ws/walk{ws_query}", ssl=wss_ssl, max_size=None) as ws:
                 await ws.send(json.dumps({"type": "hello", "role": "walk", "camera": {"width": W, "height": H,
                                                                                      "device": "virtual"}}))
                 welcome = json.loads(await ws.recv())

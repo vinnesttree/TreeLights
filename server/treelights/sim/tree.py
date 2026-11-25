@@ -69,9 +69,14 @@ def make_tree(
     connector: float = 20.0,
     output_break_at: int | None = None,
     seed: int = 0,
+    breaks_at: list[int] | None = None,
 ) -> SynthTree:
+    """breaks_at: starts of separate strings (e.g. one per WLED controller), each wound
+    around the whole tree; output_break_at is the same for two strings."""
     rng = np.random.default_rng(seed)
-    parts = [(0, output_break_at), (output_break_at, n)] if output_break_at else [(0, n)]
+    starts = sorted(set(breaks_at or ([output_break_at] if output_break_at else [])))
+    edges = [0, *starts, n]
+    parts = [(edges[k], edges[k + 1]) for k in range(len(edges) - 1)]
     positions = []
     long_links: list[int] = []
     for pi, (a, b) in enumerate(parts):
@@ -104,7 +109,7 @@ def make_tree(
         assert pts is not None
         positions.append(pts)
     pos = np.concatenate(positions)
-    breaks = [output_break_at - 1] if output_break_at else []
+    breaks = [b - 1 for b in starts]
     tree = SynthTree(pos, height, base_radius, bottom, link, connector, long_links, breaks)
     # Placement along an arc guarantees chord <= arc length <= nominal bound.
     for i in range(n - 1):
