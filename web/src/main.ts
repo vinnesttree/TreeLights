@@ -10,6 +10,7 @@ import { homePage } from "./pages/home";
 import { camcalPage } from "./pages/camcal";
 import { scanPage } from "./pages/scan";
 import { schedulePage } from "./pages/schedule";
+import { drawPage } from "./pages/draw";
 
 const routes: Record<string, () => Page> = {
   "": homePage,
@@ -20,6 +21,7 @@ const routes: Record<string, () => Page> = {
   map: mapPage,
   test: testPage,
   effects: effectsPage,
+  draw: drawPage,
   schedule: schedulePage,
   camcal: camcalPage,
 };

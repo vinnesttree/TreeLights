@@ -23,7 +23,9 @@ from .capture import video as videomode
 from .capture.session import CaptureSession
 from .capture.store import ScanStore
 from .config import ConfigStore
-from .effects import EFFECTS, LIBRARY, PALETTE_IDS, Identify, TreeGeometry, catalogue, library, make_renderer
+from .drawing import Drawing
+from .effects import (EFFECTS, LIBRARY, PALETTE_IDS, DrawingEffect, Identify, TreeGeometry, catalogue, library,
+                      make_renderer)
 from .homeassistant import HomeAssistant
 from .lights import Lights, LightsBusy
 from .maps import guidance as guide
@@ -101,6 +103,7 @@ class AppState:
         self.control_clients: set[asyncio.Queue] = set()
         self.test_owner: str | None = None
         self.effect_renderer = None  # the running library effect, changeable live
+        self.drawing = Drawing(self)  # the picture painted on the Draw page
         self.lights = Lights(self)  # the tree as one on/off light (timers, Home Assistant)
         self.scheduler = Scheduler(self.config, self.lights)
         self.ha = HomeAssistant(self)
@@ -351,6 +354,9 @@ class AppState:
                 eff = EFFECTS[name](params)
             except ValueError as e:
                 raise HTTPException(422, str(e)) from e
+            if isinstance(eff, DrawingEffect):  # shows the Draw page's picture, live
+                self.drawing.fit()
+                eff.canvas = self.drawing.canvas
         eff.setup(tree)
         renderer = make_renderer(eff, brightness)
         self.output.set_renderer(owner, renderer, fps=40)
@@ -428,6 +434,7 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
                 await state.brightness.restore()
             except Exception as e:  # noqa: BLE001
                 log.warning("couldn't restore WLED brightness; will retry at start-up: %s", e)
+        state.drawing.flush()
         await state.ha.stop()
         await state.scheduler.stop()
         await state.lights.stop()
@@ -959,6 +966,80 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
     def homeassistant_status() -> dict:
         return state.ha.status()
 
+    # ---- drawing from the phone (the Draw page) ------------------------------------------------
+    async def draw_command(cmd: dict) -> dict:
+        """One Draw page command, from the REST API or /ws/draw. After a change the picture is
+        shown on the tree unless `show` is false, it's shown already, or a capture holds the LEDs.
+        Raises ValueError (bad input, no map), KeyError (no such drawing) or LightsBusy."""
+        d = state.drawing
+        t = cmd.get("type")
+        changed = None
+        if t == "stroke":
+            changed = d.stroke(cmd.get("points"), str(cmd.get("space", "3d")), cmd.get("radius", 0.05),
+                               cmd.get("color", "#ffffff"), bool(cmd.get("erase")), bool(cmd.get("start", True)))
+        elif t == "fill":
+            d.fill(cmd.get("color", "#ffffff"))
+        elif t == "clear":
+            d.clear()
+        elif t == "undo":
+            d.undo()
+        elif t == "load":
+            d.load(str(cmd.get("id", "")))
+        elif t == "show":
+            return await d.show()
+        else:
+            raise ValueError(f"unknown drawing command {t!r}")
+        if cmd.get("show", True):
+            await d.show_if_free()
+        return {**d.status(), **({"changed": changed} if changed is not None else {})}
+
+    def drawing_http_error(e: Exception) -> HTTPException:
+        if isinstance(e, LightsBusy):
+            return HTTPException(409, str(e))
+        if isinstance(e, KeyError):
+            return HTTPException(404, "No such drawing.")
+        return HTTPException(422, str(e))
+
+    @app.get("/api/drawing")
+    def drawing_get() -> dict:
+        """The picture (one color per LED) and whether it's on the tree."""
+        return state.drawing.state()
+
+    @app.post("/api/drawing/{action}")
+    async def drawing_action(action: str, body: dict = Body(default={})) -> dict:
+        """`stroke {points, space: "3d"|"uv", radius, color, erase?, start?, show?}`, `fill {color}`,
+        `clear`, `undo`, `show`."""
+        if action not in ("stroke", "fill", "clear", "undo", "show"):
+            raise HTTPException(404, f"unknown drawing action {action}")
+        try:
+            return await draw_command({**body, "type": action})
+        except (ValueError, TypeError, KeyError, LightsBusy) as e:
+            raise drawing_http_error(e)
+
+    @app.get("/api/drawings")
+    def drawings_list() -> list[dict]:
+        return state.drawing.saved()
+
+    @app.post("/api/drawings")
+    def drawings_save(body: dict = Body(default={})) -> dict:
+        """Save the picture as a still scene: `{name?}`."""
+        return {"ok": True, **state.drawing.save(body.get("name")), "drawings": state.drawing.saved()}
+
+    @app.post("/api/drawings/{did}/load")
+    async def drawings_load(did: str, body: dict = Body(default={})) -> dict:
+        try:
+            return await draw_command({"type": "load", "id": did, "show": body.get("show", True)})
+        except (ValueError, TypeError, KeyError, LightsBusy) as e:
+            raise drawing_http_error(e)
+
+    @app.delete("/api/drawings/{did}")
+    def drawings_delete(did: str) -> dict:
+        try:
+            state.drawing.delete(did)
+        except KeyError as e:
+            raise drawing_http_error(e)
+        return {"ok": True, "drawings": state.drawing.saved()}
+
     # ---- WebSockets ----------------------------------------------------------------------
     @app.websocket("/ws/capture")
     async def ws_capture(ws: WebSocket) -> None:
@@ -1153,6 +1234,59 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
         finally:
             pt.cancel()
             state.control_clients.discard(q)
+
+    @app.websocket("/ws/draw")
+    async def ws_draw(ws: WebSocket) -> None:
+        """The Draw page: commands in (as `draw_command`), the picture's changes and status out."""
+        if not ws_allowed(ws):
+            await ws.close(code=4401)
+            return
+        await ws.accept()
+        loop = asyncio.get_running_loop()
+        q: asyncio.Queue = asyncio.Queue(maxsize=200)
+        last: list[dict | None] = [None]
+
+        def push(msg: dict) -> None:  # event loop
+            if q.full():  # a slow client: drop the backlog and send the whole picture
+                while not q.empty():
+                    q.get_nowait()
+                msg = state.drawing.canvas_msg()
+            q.put_nowait(msg)
+
+        def push_status() -> None:  # event loop
+            st = state.drawing.status()
+            if st != last[0]:
+                last[0] = st
+                push({"type": "status", **st})
+
+        unsub = state.drawing.subscribe(push)
+        unsub_lights = state.lights.subscribe(lambda: loop.call_soon_threadsafe(push_status))
+        first = state.drawing.state()
+        last[0] = {k: v for k, v in first.items() if k != "colors"}
+        push({"type": "state", **first})
+
+        async def pump() -> None:
+            while True:
+                await ws.send_json(await q.get())
+
+        pt = asyncio.ensure_future(pump())
+        try:
+            while True:
+                text = await ws.receive_text()
+                try:
+                    cmd = json.loads(text)
+                    if not isinstance(cmd, dict):
+                        raise ValueError("expected a JSON object")
+                    await draw_command(cmd)
+                except (ValueError, TypeError, KeyError, LightsBusy) as e:
+                    push({"type": "error", "message": drawing_http_error(e).detail})
+                push_status()
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        finally:
+            pt.cancel()
+            unsub()
+            unsub_lights()
 
     @app.websocket("/ws/preview")
     async def ws_preview(ws: WebSocket) -> None:

@@ -13,6 +13,7 @@ export function homePage(): Page {
             h("li", {}, h("a", { href: "#/map" }, "Map"), ": review, fix and activate the 3D map."),
             h("li", {}, h("a", { href: "#/test" }, "Test"), ": run the sweep test on the real tree."),
             h("li", {}, h("a", { href: "#/effects" }, "Effects"), ": 3D volumetric effects and surface patterns, with WLED-style colors and palettes."),
+            h("li", {}, h("a", { href: "#/draw" }, "Draw"), ": paint on the tree with a finger; the LEDs light up as you draw."),
             h("li", {}, h("a", { href: "#/schedule" }, "Schedule"), ": switch the tree on and off, with timers at set times or at sunrise and sunset. Home Assistant is set up on the Setup page."),
           ),
         ),

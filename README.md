@@ -160,6 +160,22 @@ The **Effects** page runs effects on the tree. It works like WLED's: choose an e
   - `POST /api/test/start` with `{"effect": "helix", "brightness": 0.5, "params": {"speed": 128, "intensity": 90, "c1": 70, "c2": 100, "c3": 0, "palette": "ocean", "colors": ["#ff0000", "#000000", "#000000"]}}` starts an effect.
   - `POST /api/effects/params` with `{"params": {...}, "brightness": 0.7}` changes the running effect without restarting it.
 
+## Drawing
+
+The **Draw** page (needs a map) lets you paint on the tree with a finger. The LEDs light up as you draw.
+
+- **3D view:** one finger paints where it touches the tree; two fingers turn and zoom (or tap *Turn*). With a mouse, right-drag turns.
+- **Unwrapped view:** the tree's surface laid flat, as the surface patterns use it: across is around the tree (the two edges meet at the back), up is up. The brush stays round on the tree, so it looks wider near the narrow top.
+- **Brush:** a color, a size (a share of the tree's height), and an eraser. Every LED within the brush gets the color. *Undo*, *Clear* and *Fill with color* (the whole tree).
+- **On the tree:** painting shows the drawing on the tree, in place of the running effect. It then runs like an effect named *Drawing*: the Schedule page, the timers and Home Assistant switch it on and off, and the brightness and current limit apply. While a scan holds the LEDs, you can keep painting, and *Show on tree* puts it back once the scan is done.
+- **Saved drawings:** save the drawing under a name and load it again later. The current drawing is also kept over a restart.
+- **API:**
+  - `GET /api/drawing` (one color per LED, and whether it's on the tree).
+  - `POST /api/drawing/stroke` with `{"space": "3d", "points": [[x, y, z], ...], "radius": 0.05, "color": "#ff0000"}`. Points are in map units; with `"space": "uv"` they are `[u, v]` on the unwrapped surface (both 0–1). `radius` is a share of the tree's height. Add `"erase": true` to erase, `"show": false` to paint without taking the LEDs.
+  - `POST /api/drawing/fill {"color"}`, `/clear`, `/undo`, `/show`.
+  - `GET`/`POST /api/drawings {"name"}`, `POST /api/drawings/<id>/load`, `DELETE /api/drawings/<id>`.
+  - `WSS /ws/draw`: the same commands as messages (`{"type": "stroke", ...}`); every open Draw page gets the changes.
+
 ## Switching on and off: timers and Home Assistant
 
 The **Schedule** page switches the tree on and off.
@@ -239,6 +255,7 @@ Layout:
   - `wled/`: DDP, JSON API, discovery, monitor
   - `output/`: lease and keepalive thread
   - `lights.py`, `schedule.py`, `sun.py`, `homeassistant.py`: on/off, timers, sunrise/sunset, Home Assistant over MQTT
+  - `drawing.py`: drawing from the phone (the brush is in `effects/drawing.py`)
   - `walk/`: walk-around capture (pattern, timing, tracking, gyro calibration, decoding, session, job)
   - `capture/`: tripod live session, scan store, video mode
   - `detection/`
