@@ -5,12 +5,16 @@ WLED's master brightness (which WLED applies to realtime data unless its "force
 max brightness" option is on). The original state is written to disk *before*
 anything is changed, and put back at the end of the capture, or at the next
 start-up if the server stopped in between.
+
+A tree with several controllers has one guard per controller, each with its own file:
+`wled_restore.json` for the first, `wled_restore_<k>.json` for controller k (k >= 2).
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Callable, Sequence
 
 from .. import storage
 from .link import WledLink
@@ -21,9 +25,14 @@ RESTORE_FILE = "wled_restore.json"
 BOOST_BRI = 255
 
 
+def restore_file(k: int) -> str:
+    """The file controller k (0-based) saves its state in."""
+    return RESTORE_FILE if k == 0 else f"wled_restore_{k + 1}.json"
+
+
 class BrightnessGuard:
-    def __init__(self, data_dir: Path, link: WledLink):
-        self.path = Path(data_dir) / RESTORE_FILE
+    def __init__(self, data_dir: Path, link: WledLink, filename: str = RESTORE_FILE):
+        self.path = Path(data_dir) / filename
         self.link = link
 
     @property
@@ -64,3 +73,49 @@ class BrightnessGuard:
         self.path.unlink(missing_ok=True)
         log.info("restored WLED master brightness to %d", int(saved["bri"]))
         return True
+
+
+class GroupBrightness:
+    """The guards of all controllers of a tree. `links` is read at each call, so it follows
+    changes to the tree's controllers."""
+
+    def __init__(self, data_dir: Path, links: Callable[[], Sequence[WledLink]]):
+        self.data_dir = Path(data_dir)
+        self._links = links
+
+    def guards(self) -> list[BrightnessGuard]:
+        return [BrightnessGuard(self.data_dir, link, restore_file(k)) for k, link in enumerate(self._links())]
+
+    @property
+    def boosted(self) -> bool:
+        return any(g.boosted for g in self.guards())
+
+    async def boost(self) -> bool:
+        """Raise every reachable controller's master brightness. True if any was raised.
+        A controller that fails doesn't stop the others; the first error is raised after."""
+        raised, err = False, None
+        for g in self.guards():
+            if not g.link.host:
+                continue
+            try:
+                raised |= await g.boost()
+            except Exception as e:  # noqa: BLE001
+                log.warning("couldn't raise the master brightness of %s: %s", g.link.host, e)
+                err = err or e
+        if err and not raised:
+            raise err
+        return raised
+
+    async def restore(self) -> bool:
+        """Restore every controller that was raised. Errors are raised after trying all."""
+        restored, err = False, None
+        for g in self.guards():
+            if not g.boosted:
+                continue
+            try:
+                restored |= await g.restore()
+            except Exception as e:  # noqa: BLE001
+                err = err or e
+        if err:
+            raise err
+        return restored
