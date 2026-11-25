@@ -1,7 +1,11 @@
 """Home Assistant integration over MQTT, with MQTT discovery: the tree appears in Home
 Assistant as a device without any YAML.
 
-Entities (topics under `<base>` = the `base_topic` setting, default "treelights"):
+Each tree has its own instance, MQTT connection and topic (`<base>`, the tree's
+`mqtt_topic`: "treelights" for the first tree, "treelights_<id>" for trees added later),
+so each tree is its own device; the broker settings are shared.
+
+Entities (topics under `<base>`):
 
 | Entity | Topics | |
 |---|---|---|
@@ -33,12 +37,12 @@ from typing import TYPE_CHECKING, Any
 import paho.mqtt.client as mqtt
 
 from . import __version__
-from .config import MqttSettings
+from .config import DEFAULT_TREE_NAME, MqttSettings
 from .effects import LIBRARY, catalogue
 from .lights import LightsBusy
 
 if TYPE_CHECKING:
-    from .app import AppState
+    from .tree import Tree
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +64,7 @@ def _rgb(hex_color: str) -> dict:
 
 
 class HomeAssistant:
-    def __init__(self, app: "AppState"):
+    def __init__(self, app: "Tree"):
         self.app = app
         self.client: mqtt.Client | None = None
         self.settings: MqttSettings | None = None  # the settings the client was started with
@@ -83,7 +87,10 @@ class HomeAssistant:
 
     def _discovery(self, s: MqttSettings) -> dict[str, dict]:
         b, node = s.base_topic, node_id(s.base_topic)
-        device = {"identifiers": [node], "name": "TreeLights", "manufacturer": "TreeLights",
+        tree_name = self.app.config.settings.tree_name
+        # Each tree is its own device (its own topic); the first keeps the name it always had.
+        name = "TreeLights" if tree_name == DEFAULT_TREE_NAME else f"TreeLights {tree_name}"
+        device = {"identifiers": [node], "name": name, "manufacturer": "TreeLights",
                   "model": "Mapped LED tree (WLED)", "sw_version": __version__}
         common = {"availability_topic": f"{b}/status", "device": device,
                   "origin": {"name": "TreeLights", "sw_version": __version__}}
@@ -336,10 +343,12 @@ class HomeAssistant:
         await asyncio.get_running_loop().run_in_executor(None, finish)
         self._sent = {}
 
-    async def stop(self) -> None:
+    async def stop(self, remove_entities: bool = False) -> None:
+        """Disconnect; with remove_entities (the tree was removed), its entities are
+        deleted from Home Assistant first."""
         if self._task:
             self._task.cancel()
             self._task = None
         async with self._apply_lock:
-            await self._disconnect(remove_entities=False)
+            await self._disconnect(remove_entities=remove_entities)
             self.settings = None
