@@ -15,6 +15,8 @@ predict something different, and beats "no rotation".
 from __future__ import annotations
 
 import itertools
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -186,20 +188,31 @@ def collect_long_pairs(rows: np.ndarray, frame_t: np.ndarray, gap_s: float = 1.0
 
 def _image_rotations(pairs, f: float, cx: float, cy: float) -> list:
     """Relative rotation of each pair from the image alone (essential matrix: handles the
-    walking translation), or None where it can't be estimated."""
+    walking translation), or None where it can't be estimated.
+
+    The pairs are independent and OpenCV releases the GIL, so they run on threads: most of
+    decoding a walk is spent here (each source tries about 11 focal lengths). OpenCV's RANSAC
+    starts from the same seed on every call, so the result is identical to running them in
+    order."""
+    if len(pairs) < 2 or _THREADS < 2:
+        return [_pair_rotation(p, q, f, cx, cy) for _a, _b, p, q in pairs]
+    with ThreadPoolExecutor(min(_THREADS, len(pairs))) as ex:
+        return list(ex.map(lambda pr: _pair_rotation(pr[2], pr[3], f, cx, cy), pairs))
+
+
+_THREADS = min(4, os.cpu_count() or 1)
+
+
+def _pair_rotation(p: np.ndarray, q: np.ndarray, f: float, cx: float, cy: float) -> np.ndarray | None:
     import cv2
 
-    out = []
-    for _a, _b, p, q in pairs:
-        pa = (p - [cx, cy]) / f
-        pb = (q - [cx, cy]) / f
-        E, mask = cv2.findEssentialMat(pa, pb, np.eye(3), method=cv2.RANSAC, prob=0.999, threshold=1.5 / f)
-        if E is None or E.shape != (3, 3):
-            out.append(None)
-            continue
-        n_in, R, _t, _m = cv2.recoverPose(E, pa, pb, np.eye(3), mask=mask)
-        out.append(R if n_in >= 0.6 * len(pa) else None)
-    return out
+    pa = (p - [cx, cy]) / f
+    pb = (q - [cx, cy]) / f
+    E, mask = cv2.findEssentialMat(pa, pb, np.eye(3), method=cv2.RANSAC, prob=0.999, threshold=1.5 / f)
+    if E is None or E.shape != (3, 3):
+        return None
+    n_in, R, _t, _m = cv2.recoverPose(E, pa, pb, np.eye(3), mask=mask)
+    return R if n_in >= 0.6 * len(pa) else None
 
 
 def _angle_deg(R: np.ndarray) -> float:
