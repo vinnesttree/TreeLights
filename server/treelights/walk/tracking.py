@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.spatial import cKDTree
 
+from .. import native
 from .blobs import FLUX, SAT, SHARP, X, Y
 
 GATE_PX = 5.0
@@ -174,6 +175,8 @@ def track(frames: list[Frame], K: np.ndarray | None = None, use_gyro: bool = Tru
     the gap: an LED is then one long track, which is what decoding needs (a full code
     cycle is 7.2 s). A wrong re-acquisition gives conflicting bit votes and the track
     is rejected by the decoder rather than mislabelled."""
+    if not LOCAL_FIELD and native.available("track"):
+        return _track_native(frames, K, use_gyro, progress)
     pos = np.zeros((0, 2)); vel = np.zeros((0, 2)); last = np.zeros(0); ids = np.zeros(0, int)  # noqa: E702
     lpos = np.zeros((0, 2)); lvel = np.zeros((0, 2)); llast = np.zeros(0); lids = np.zeros(0, int)  # noqa: E702
     next_id = 0
@@ -289,6 +292,30 @@ def track(frames: list[Frame], K: np.ndarray | None = None, use_gyro: bool = Tru
         prev = fr
     arr = np.array(rows, float) if rows else np.zeros((0, 7))
     return TrackSet(arr, next_id, shifts)
+
+
+def _track_native(frames: list[Frame], K: np.ndarray | None, use_gyro: bool, progress) -> TrackSet:
+    """track() in Rust (server/native/src/track.rs): the same loop, without the
+    experimental local motion field. The gyro homographies are computed here, as above."""
+    nf = len(frames)
+    blobs = [np.asarray(fr.blobs, float).reshape(len(fr.blobs), -1) if len(fr.blobs) else np.zeros((0, 6))
+             for fr in frames]
+    offsets = np.zeros(nf + 1, np.int64)
+    offsets[1:] = np.cumsum([len(b) for b in blobs])
+    allb = np.ascontiguousarray(np.concatenate(blobs, axis=0) if nf else np.zeros((0, 6)))
+    t = np.array([float(fr.t) for fr in frames], float)
+    H = np.zeros((nf, 3, 3))
+    has_h = np.zeros(nf, bool)
+    if use_gyro and K is not None:
+        for fi in range(1, nf):
+            prev, fr = frames[fi - 1], frames[fi]
+            if fr.R is not None and prev.R is not None:
+                H[fi] = rotation_homography(prev.R, fr.R, K)
+                has_h[fi] = True
+    params = [GATE_PX, VOTE_GATE_GYRO, VOTE_GATE_NOGYRO, MAX_COAST_S, MAX_DEVIATION_PX, LOCK_FRAMES, SHIFT_ALPHA,
+              MAX_LOST_S, REACQUIRE_PX_PER_S, REACQUIRE_MAX_PX, VEL_ALPHA]
+    rows, n_tracks, shifts = native.lib.track(allb, offsets, t, H, has_h, [float(p) for p in params], progress)
+    return TrackSet(rows, int(n_tracks), shifts)
 
 
 STITCH_MAX_GAP_S = 1.0  # a piece may continue another after at most this gap
