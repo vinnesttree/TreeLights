@@ -10,13 +10,14 @@ COPY web/ ./
 RUN npm run build
 
 # The native (Rust) kernels for walk processing and reconstruction, built as a wheel for
-# the target platform (server/native). Same base as the runtime, so the wheel matches its
-# glibc and Python.
-FROM python:3.12.8-slim-bookworm AS native
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gcc libc6-dev \
-    && rm -rf /var/lib/apt/lists/*
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --profile minimal --default-toolchain 1.97.0 \
+# the target platform (server/native). The full Python image of the same release as the
+# runtime already has a C toolchain and curl, and the wheel matches the runtime's glibc and
+# Python. rustup-init comes from its release location, checked against its published hash.
+FROM python:3.12.8-bookworm AS native
+RUN t="$(uname -m)-unknown-linux-gnu" \
+    && curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init "https://static.rust-lang.org/rustup/dist/$t/rustup-init" \
+    && echo "$(curl --proto '=https' --tlsv1.2 -sSf "https://static.rust-lang.org/rustup/dist/$t/rustup-init.sha256" | cut -d' ' -f1)  /tmp/rustup-init" | sha256sum -c - \
+    && chmod +x /tmp/rustup-init && /tmp/rustup-init -y --profile minimal --default-toolchain 1.97.0 && rm /tmp/rustup-init \
     && /root/.cargo/bin/rustc --version
 ENV PATH=/root/.cargo/bin:$PATH
 RUN pip install --no-cache-dir maturin==1.16.0
