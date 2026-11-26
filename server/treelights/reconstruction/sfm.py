@@ -17,6 +17,7 @@ import numpy as np
 from scipy.optimize import least_squares
 from scipy.sparse import lil_matrix
 
+from .. import native
 from .camera import Intrinsics, camera_center, rodrigues, to_rvec, undistort_normalized
 from .geometry import project_points, rodrigues_batch, triangulate_rays
 
@@ -233,27 +234,15 @@ def bundle_adjust(segs: dict[str, SegmentObs], cams: Cameras, fixed: str, scale_
         return np.concatenate([r] + [np.asarray(e, float) for e in extra])
 
     m = 2 * len(obs_uv)
-    n_extra = nseg + 1 + (1 if scale0 else 0)
-    A = lil_matrix((m + n_extra, len(x0)), dtype=int)
-    rows = np.arange(len(obs_uv))
-    for c in range(1 if fix_f0 else 0, 3):
-        A[:m, c] = 1
-    for k in range(2):
-        A[2 * rows + k, o_fd + obs_s] = 1
-        for j in range(3):
-            A[2 * rows + k, o_pts + 3 * obs_p + j] = 1
-        fr = free_idx[obs_s]
-        sel = fr >= 0
-        for j in range(6):
-            A[2 * rows[sel] + k, o_pose + 6 * fr[sel] + j] = 1
-    for k in range(nseg):
-        A[m + k, o_fd + k] = 1
-    A[m + nseg, 2] = 1
-    if scale0:
-        A[m + nseg + 1, o_pose + 6 * fi[scale_ref] : o_pose + 6 * fi[scale_ref] + 6] = 1
-    sol = least_squares(residuals, x0, jac_sparsity=A, loss=loss, f_scale=2.0, x_scale="jac",
-                        max_nfev=max_nfev, method="trf", tr_solver="lsmr")
-    x = sol.x
+    if loss == "cauchy" and native.available("ba_minimize"):
+        x = native.lib.ba_minimize(
+            np.ascontiguousarray(x0, float), np.ascontiguousarray(obs_s, np.int64), np.ascontiguousarray(obs_p, np.int64),
+            np.ascontiguousarray(obs_uv, float), size, np.ascontiguousarray(cx, float), np.ascontiguousarray(cy, float),
+            np.ascontiguousarray(free_idx, np.int64), np.ascontiguousarray(Rfix, float), np.ascontiguousarray(tfix, float),
+            npts, bool(fix_f0), logf0, FOCAL_PRIOR, si[scale_ref] if scale0 else -1, float(scale0 or 0.0), int(max_nfev), 2.0)
+    else:
+        x = _bundle_adjust_scipy(residuals, x0, m, nseg, fix_f0, obs_s, obs_p, o_fd, o_pts, o_pose, free_idx, fi,
+                                 scale0, scale_ref, loss, max_nfev)
     R, t, P = unpack(x)
     cams.f0 = float(np.exp(logf0 if fix_f0 else x[0]))
     cams.k1, cams.k2 = float(x[1]), float(x[2])
@@ -272,6 +261,32 @@ def bundle_adjust(segs: dict[str, SegmentObs], cams: Cameras, fixed: str, scale_
     np.maximum.at(bad, obs_p, e > 3 * REPROJ_INLIER_PX)
     for l in [leds[k] for k in np.nonzero(bad)[0]]:
         cams.points.pop(l, None)
+
+
+def _bundle_adjust_scipy(residuals, x0, m, nseg, fix_f0, obs_s, obs_p, o_fd, o_pts, o_pose, free_idx, fi, scale0,
+                         scale_ref, loss, max_nfev) -> np.ndarray:
+    """The minimisation of bundle_adjust with scipy (without the native module)."""
+    n_extra = nseg + 1 + (1 if scale0 else 0)
+    A = lil_matrix((m + n_extra, len(x0)), dtype=int)
+    rows = np.arange(m // 2)
+    for c in range(1 if fix_f0 else 0, 3):
+        A[:m, c] = 1
+    for k in range(2):
+        A[2 * rows + k, o_fd + obs_s] = 1
+        for j in range(3):
+            A[2 * rows + k, o_pts + 3 * obs_p + j] = 1
+        fr = free_idx[obs_s]
+        sel = fr >= 0
+        for j in range(6):
+            A[2 * rows[sel] + k, o_pose + 6 * fr[sel] + j] = 1
+    for k in range(nseg):
+        A[m + k, o_fd + k] = 1
+    A[m + nseg, 2] = 1
+    if scale0:
+        A[m + nseg + 1, o_pose + 6 * fi[scale_ref] : o_pose + 6 * fi[scale_ref] + 6] = 1
+    sol = least_squares(residuals, x0, jac_sparsity=A, loss=loss, f_scale=2.0, x_scale="jac",
+                        max_nfev=max_nfev, method="trf", tr_solver="lsmr")
+    return sol.x
 
 
 def _incremental(segs: dict[str, SegmentObs], a: str, b: str, init, f0: float, fix_f0: bool = False) -> Cameras:
