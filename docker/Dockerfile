@@ -9,6 +9,20 @@ RUN npm ci --no-audit --no-fund
 COPY web/ ./
 RUN npm run build
 
+# The native (Rust) kernels for walk processing and reconstruction, built as a wheel for
+# the target platform (server/native). Same base as the runtime, so the wheel matches its
+# glibc and Python.
+FROM python:3.12.8-slim-bookworm AS native
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --profile minimal --default-toolchain 1.97.0 \
+    && /root/.cargo/bin/rustc --version
+ENV PATH=/root/.cargo/bin:$PATH
+RUN pip install --no-cache-dir maturin==1.16.0
+COPY server/native /native
+RUN cd /native && maturin build --release --locked -o /wheels
+
 FROM python:3.12.8-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -17,6 +31,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY server/requirements.lock ./
 RUN pip install --no-cache-dir -r requirements.lock
+COPY --from=native /wheels /wheels
+RUN pip install --no-cache-dir --no-deps /wheels/*.whl && rm -rf /wheels \
+    && python -c "import treelights_native"
 COPY server/treelights ./treelights
 COPY --from=web /web/dist ./web
 COPY docker/entrypoint.sh /entrypoint.sh
