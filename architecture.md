@@ -1037,6 +1037,9 @@ server/treelights/
   sim/               synthetic tree, scene renderer, virtual WLED, virtual phone, virtual walker,
                      synthetic videos, simulated rig
   camcal.py          optional ChArUco camera calibration
+  native.py          loads the native kernels (below), if installed
+server/native/       Rust (PyO3) kernels: bundle adjustment, LED hypotheses, point refinement,
+                     walk tracking. Each has a Python fallback; TREELIGHTS_NATIVE=0 uses it.
 server/tests/        unit, simulator and end-to-end tests
 server/tools/        offline reports and ablations for walks
 web/                 Vite + TypeScript + three.js; one module per page in web/src/pages/
