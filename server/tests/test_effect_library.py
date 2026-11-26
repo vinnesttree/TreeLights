@@ -28,7 +28,8 @@ def tree_map(n=300, seed=1):
             "quality": {"activation_blocked": None, "warnings": []}, "wled": {"config_hash": "sha256:a"}}
 
 
-@pytest.mark.parametrize("name", list(LIBRARY))
+# The drawing shows a picture painted on the Draw page, so it's tested on its own (test_drawing.py).
+@pytest.mark.parametrize("name", [k for k in LIBRARY if k != "drawing"])
 def test_every_library_effect_renders_and_reacts_to_params(name):
     tree = TreeGeometry.from_map(tree_map())
     eff = LIBRARY[name]()
@@ -111,7 +112,7 @@ def test_params_parsing_and_palettes():
     ids = {p["id"] for p in catalogue()}
     assert ids == PALETTE_IDS and "default" in ids
     cats = {e["category"] for e in library()}
-    assert cats == {"3d", "surface", "gift", "basic"}
+    assert cats == {"3d", "surface", "gift", "basic", "drawing"}
 
 
 @pytest.mark.timeout(60)

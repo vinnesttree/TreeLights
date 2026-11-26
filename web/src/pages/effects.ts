@@ -7,7 +7,7 @@ type Slider = "speed" | "intensity" | "c1" | "c2" | "c3";
 const SLIDERS: Slider[] = ["speed", "intensity", "c1", "c2", "c3"];
 type Params = Record<Slider, number> & { palette: string; colors: string[] };
 type EffectInfo = {
-  name: string; label: string; category: "3d" | "surface" | "gift" | "basic"; description: string; needs_map: boolean;
+  name: string; label: string; category: "3d" | "surface" | "gift" | "basic" | "drawing"; description: string; needs_map: boolean;
   controls: Partial<Record<Slider, string>>; color_slots: string[]; default_palette: string; uses_palette: boolean;
   defaults: Params;
 };
@@ -19,6 +19,7 @@ const CATEGORIES: [EffectInfo["category"], string, string][] = [
   ["surface", "Surface patterns", "Patterns painted on the tree's outer surface. Depth fade hides the inner LEDs."],
   ["gift", "Inspired by Matt Parker's tree", "Ideas from the Stand-up Maths tree and the animations people made for it, rebuilt for this tree."],
   ["basic", "Basic", "Work along the string; no map needed."],
+  ["drawing", "Drawing", "The picture painted on the Draw page."],
 ];
 const QUICK = ["#ff0000", "#ff6000", "#ffa000", "#ffd000", "#ffffff", "#ffe0a0", "#00ff00", "#00c080", "#00ffff",
   "#0060ff", "#0000ff", "#8000ff", "#ff00c0", "#ff80a0", "#000000"];

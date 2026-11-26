@@ -42,6 +42,9 @@ export class TreeViewer {
   private index: number[] = []; // instance -> LED index
   private ledToInst = new Map<number, number>();
   private pointer = { x: 0, y: 0, down: 0 };
+  private brush: THREE.Mesh | null = null;
+  /** Tapping an LED selects it (off while painting on the Draw page). */
+  pickEnabled = true;
   onSelect: (i: number | null) => void = () => {};
   onDragEnd: (i: number, p: [number, number, number]) => void = () => {};
 
@@ -62,7 +65,7 @@ export class TreeViewer {
     el.addEventListener("pointerdown", (e) => (this.pointer = { x: e.clientX, y: e.clientY, down: performance.now() }));
     el.addEventListener("pointerup", (e) => {
       const moved = Math.hypot(e.clientX - this.pointer.x, e.clientY - this.pointer.y);
-      if (moved < 6 && performance.now() - this.pointer.down < 500 && !this.drag?.dragging) this.pick(e);
+      if (this.pickEnabled && moved < 6 && performance.now() - this.pointer.down < 500 && !this.drag?.dragging) this.pick(e);
     });
     this.resize();
     const tick = () => {
@@ -185,6 +188,45 @@ export class TreeViewer {
     const i = best >= 0 ? this.index[best] : null;
     this.select(i);
     this.onSelect(i);
+  }
+
+  /** The canvas the view is drawn on (for pointer events). */
+  get element(): HTMLCanvasElement {
+    return this.renderer.domElement;
+  }
+
+  /** The ray from the camera through a point on the screen. */
+  rayAt(clientX: number, clientY: number): THREE.Ray {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(ndc, this.camera);
+    return ray.ray;
+  }
+
+  /** Painting mode: one finger (or the left mouse button) is left to the page; two fingers
+   * (or the right mouse button) turn and zoom the view. Off: the usual orbit controls. */
+  setPaintMode(on: boolean): void {
+    this.controls.touches = on ? { ONE: null, TWO: THREE.TOUCH.DOLLY_ROTATE } : { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
+    this.controls.mouseButtons = on
+      ? { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE }
+      : { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+    this.pickEnabled = !on;
+  }
+
+  /** A translucent sphere showing the brush (radius in map units), or none. */
+  setBrush(p: [number, number, number] | null, radius = 1, color = "#ffffff"): void {
+    if (!this.brush) {
+      this.brush = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25, depthWrite: false }));
+      this.scene.add(this.brush);
+    }
+    this.brush.visible = !!p;
+    if (p) {
+      this.brush.position.set(p[0], p[1], p[2]);
+      this.brush.scale.setScalar(radius);
+      (this.brush.material as THREE.MeshBasicMaterial).color.set(color);
+    }
   }
 
   /** Let the user drag one LED; reports the new position when released. */

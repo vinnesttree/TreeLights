@@ -43,10 +43,14 @@
 - One test animation (a 3D sweep), plus "identify LED" (blink one LED).
 - *Added after draft 4:*
   - an **effect library** (§12): 3D volumetric effects, surface patterns, effects inspired by Matt Parker's tree (including falling, bouncing balls and planes spinning through the tree) and basic effects, with WLED-style sliders, colors and palettes;
-  - **on/off, timers** (time of day, sunrise and sunset) and **Home Assistant** over MQTT (§12.1).
+  - **on/off, timers** (time of day, sunrise and sunset) and **Home Assistant** over MQTT (§12.1);
+  - **drawing from the phone**, on the Draw page:
+    - A finger paints on the 3D view (where it meets the surface model) or on the unwrapped surface (u, v as in §12).
+    - The brush colors every LED within its radius of the stroke: in map coordinates, or along the surface. The radius is a fraction of the tree's height. LEDs without a position stay off.
+    - On the tree, the picture runs as the library effect `drawing` (`drawing.py`, `effects/drawing.py`). It has the same lease, brightness and power cap as every effect, and the same rules as §12.1: a capture holding the LEDs refuses it (`LightsBusy`), and the picture is kept for later.
+    - Saved drawings are still scenes, one color per LED, in `/data/drawings/`.
 
 **Later.** The map format and the effect interface are designed for these, but they aren't built now:
-- drawing from the phone;
 - WLED ledmap export;
 - multiple controllers.
 
@@ -1000,6 +1004,7 @@ The web app is phone-first, built with TypeScript, Vite and three.js, and served
 | Map | 3D review, quality report, editing, re-scan, versions, activation, export. |
 | Test | Sweep test, status colors, identify LED, brightness. |
 | Effects | The effect library, WLED-style sliders, colors and palettes, live 3D preview. |
+| Draw | Paint on the tree with a finger, on the 3D view or the unwrapped surface: brush color and size, eraser, undo, clear, fill; the LEDs follow live. Saved drawings. |
 | Schedule | Switch the lights on and off; timers at set times or relative to sunrise and sunset; time zone and location. |
 
 ## 16. Server layout and API
@@ -1016,6 +1021,7 @@ server/treelights/
   lights.py          on/off and the running effect (§12.1)
   schedule.py, sun.py  timers, sunrise and sunset
   homeassistant.py   Home Assistant over MQTT discovery
+  drawing.py         drawing from the phone: brush, undo, saved drawings
   wled/              DDP, JSON API client, discovery, monitor, config fingerprint
   output/            lease, output thread, keepalive, renderer, power cap
   capture/           session state machines, protocol, capture plans, codes, verification
@@ -1054,6 +1060,7 @@ docker/              Dockerfile, docker-compose.yml (pulls the published image),
 - **Test animation and effects:** `GET /api/effects`, `POST /api/test/start {effect, params?, brightness?}`, `POST /api/effects/params`, `POST /api/test/stop`, and `WSS /ws/preview` (live colors for the 3D view)
 - **Camera calibration:** `GET /api/camcal/board.png`, `POST /api/camcal/frame`, `POST /api/camcal/solve`, `POST /api/camcal/reset`, `GET /api/camcal/profiles`
 - **Lights and timers:** `GET`/`POST /api/lights {on, effect?, params?, brightness?}`, `GET`/`PUT /api/schedule`, `GET /api/homeassistant`
+- **Drawing:** `GET /api/drawing`; `POST /api/drawing/stroke {points, space: 3d|uv, radius, color, erase?, show?}`, `POST /api/drawing/fill|clear|undo|show`; `WSS /ws/draw` (the same commands, and every change to every open Draw page); saved drawings: `GET`/`POST /api/drawings`, `POST /api/drawings/{id}/load`, `DELETE /api/drawings/{id}`
 
 ## 17. Testing
 
