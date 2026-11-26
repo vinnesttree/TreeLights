@@ -178,6 +178,15 @@ def solve_gap(a: np.ndarray, b: np.ndarray | None, links: list[float], path: np.
     for k, (C, dvec) in rays.items():  # start single-view LEDs on their ray
         v = path[k] - C
         x0[3 * k : 3 * k + 3] = C + max(v @ dvec, 0.0) * dvec
+    if native.available("solve_gap"):
+        # The same problem in Rust (native/src/fill.rs): exact block-tridiagonal steps instead
+        # of a dense finite-difference Jacobian, whose cost grows with the cube of the gap.
+        ks = sorted(rays)
+        return native.lib.solve_gap(
+            np.asarray(a, float), None if b is None else np.asarray(b, float), np.asarray(links, float),
+            np.ascontiguousarray(path, float).reshape(m, 3), x0.reshape(m, 3), np.array(ks, np.int64),
+            np.array([rays[k][0] for k in ks], float).reshape(-1, 3), np.array([rays[k][1] for k in ks], float).reshape(-1, 3),
+            float(scale_ref))
     sol = least_squares(res, x0, method="trf", max_nfev=200)
     return sol.x.reshape(m, 3)
 

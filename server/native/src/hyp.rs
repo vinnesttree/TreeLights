@@ -599,7 +599,7 @@ impl PointsProblem<'_> {
 }
 
 /// Solve the block tridiagonal system (diag d, off-diagonal o between k and k+1) for rhs.
-fn block_thomas(
+pub(crate) fn block_thomas(
     d: &[Matrix3<f64>],
     o: &[Matrix3<f64>],
     rhs: &[Vector3<f64>],

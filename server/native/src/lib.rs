@@ -6,6 +6,7 @@
 use pyo3::prelude::*;
 
 mod ba;
+mod fill;
 mod hyp;
 mod track;
 
@@ -18,6 +19,7 @@ fn version() -> &'static str {
 fn treelights_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     ba::register(m)?;
+    fill::register(m)?;
     hyp::register(m)?;
     track::register(m)?;
     Ok(())
