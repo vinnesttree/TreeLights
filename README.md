@@ -235,6 +235,10 @@ Topics are `treelights/...` (availability `treelights/status`). Give a second tr
 
 ```sh
 python3 -m venv .venv && .venv/bin/pip install -r server/requirements.lock pytest==8.3.4 pytest-asyncio==0.25.0 pytest-timeout==2.3.1
+# Optional: the native (Rust) kernels for walk processing and reconstruction. Without them the
+# same steps run in Python, several times slower; TREELIGHTS_NATIVE=0 turns them off.
+.venv/bin/pip install maturin==1.16.0 && .venv/bin/maturin build --release --locked -m server/native/Cargo.toml -o server/native/target/wheels \
+  && .venv/bin/pip install --force-reinstall --no-deps server/native/target/wheels/treelights_native-*.whl
 cd server && ../.venv/bin/python -m pytest -q            # ~6 min: unit, closed-loop and end-to-end tests
 cd web && npm ci && npm run build                         # web app -> web/dist
 
