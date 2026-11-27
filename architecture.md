@@ -517,6 +517,7 @@ The quick reconstruction also predicts which LEDs face the next view, which focu
 The default capture since draft 4. You walk once around the tree with the phone. The camera runs the whole time, and there are no discrete pictures to take. The server works from two sources of the same walk:
 - **live frames**, about 8 per second, streamed while you walk. They drive the feedback on the phone, and are kept for processing;
 - **the recording**, at the camera's full rate (30 fps), made by the browser at the same time and uploaded at the end.
+  - It is 1280x720 at 8 Mbit/s, and larger recordings are downscaled to 1280 px wide before LEDs are found. **Full resolution** (Setup, off by default) records 1920x1080 at 16 Mbit/s and finds the LEDs at that size, for dense trees (§17). A 1080p recording must not be downscaled: in simulation that lost the LEDs' dim slots and almost nothing decoded.
 
 Both are decoded the same way, and keyframes from both go into one reconstruction.
 
@@ -1123,6 +1124,19 @@ The end-to-end test runs the real server against a virtual phone walking in real
 - **End to end** (real server, a virtual phone walking in real time, DDP to a virtual WLED): the maps are as accurate. In this simulation, rendering the full fault scene in real time only reaches about 4 live frames/s. That is too few to decode, so live decoding under faults is tested offline at 8 frames/s.
 
 **Unit tests:** DDP encoding, the Hamming code, the walk pattern and its decoder (wrong answers never accepted under bit errors and track swaps), timing sync with drift, gyro conventions, tracking with and without the gyro, the detector on recorded frames, chain selection on hand-built chains, bound learning, gap filling, and atomic storage.
+
+**Dense trees, in simulation** (1600 LEDs on a 2.9 m tree, 60 s walks with every fault; walks of one tree solved together as one scan):
+
+| Walks | Measured | Unknown | Error of measured (median / p95) |
+|---|---|---|---|
+| One walk, 1280x720 | 51% | 106 | 0.15 / 0.51 cm |
+| One walk, full resolution (1920x1080) | 67% | 52 | 0.05 / 0.21 cm |
+| One close walk (`WalkConfig.close`), 1280x720 | 69% | 103 | 0.05 / 0.23 cm |
+| Full resolution + close + phone low (15% height) | 85% | 48 | 0.04 / 0.15 cm |
+
+- **What's missed** is mostly the wide bottom of the tree and LEDs deep inside it, hidden by branches, not LEDs crowding each other in the picture.
+- **Live frames** (960 px) decode almost nothing on such a tree from far away; from close they do (573 LEDs).
+- **So for dense trees:** full resolution, and a close walk added to the scan (Re-scan), with a low one if LEDs at the bottom are missing.
 
 **On a real tree** (step 11 of §18, done):
 - **Setup:** 600 WS2811 LEDs on one GPIO output of a WLED controller.

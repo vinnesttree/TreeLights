@@ -58,6 +58,7 @@ export function scanPage(): Page {
   const wake = new WakeLock();
   let timers: number[] = [];
   let state: "idle" | "starting" | "walking" | "stopping" | "uploading" | "processing" | "done" = "idle";
+  let fullRes = false; // this walk records at full resolution (Setup option)
   let scan: string | null = null;
   // ?scan=<id>: add this walk to an existing scan (a re-scan, §11.5).
   const addTo = new URLSearchParams(location.hash.split("?")[1] ?? "").get("scan");
@@ -194,7 +195,10 @@ export function scanPage(): Page {
         try {
           const src = await orient.start();
           if (src !== "sensor") setMsg("Using the basic orientation events (the motion sensor API isn't available).", "warn");
-          await cam!.start(null, 1280, 720);
+          // Full resolution (Setup, off by default) helps dense trees; the server then finds the
+          // LEDs at the recording's own size.
+          fullRes = await api("/api/config").then((c) => !!c.capture?.walk_full_resolution, () => false);
+          await cam!.start(null, fullRes ? 1920 : 1280, fullRes ? 1080 : 720);
           await new Promise((r) => setTimeout(r, 800)); // let exposure settle on the lit tree
           await cam!.lock();
           await wake.acquire();
@@ -221,7 +225,8 @@ export function scanPage(): Page {
         const { width, height } = cam!.size;
         const resume = state === "walking" || state === "stopping";
         return { type: "hello", role: "walk", scan: resume ? scan : addTo ?? undefined, view: resume ? view : undefined,
-          camera: { width, height, device: cam!.deviceId, sensor: orient.source, screen: screen.orientation?.type } };
+          camera: { width, height, device: cam!.deviceId, sensor: orient.source, screen: screen.orientation?.type,
+            full_resolution: fullRes } };
       }
 
       function connect() {
@@ -273,7 +278,7 @@ export function scanPage(): Page {
         chunks.length = 0;
         const mime = pickMime();
         try {
-          recorder = new MediaRecorder(cam!.stream!, { mimeType: mime, videoBitsPerSecond: 8_000_000 });
+          recorder = new MediaRecorder(cam!.stream!, { mimeType: mime, videoBitsPerSecond: fullRes ? 16_000_000 : 8_000_000 });
           recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
           recorder.onstart = () => sock?.sendJson({ type: "rec_start", t: phoneNow() });
           recorder.start(1000);

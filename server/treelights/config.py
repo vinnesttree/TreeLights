@@ -44,6 +44,10 @@ class CaptureSettings(BaseModel):
     thorough: bool = False
     constellation_every: int = 25
     retries: int = 2
+    # Walk-around: record at 1920x1080 (instead of 1280x720) and find the LEDs at the
+    # recording's full size. Helps dense trees (simulated 1600 LEDs on a 2.9 m tree: 67% instead
+    # of 51% measured from one walk); bigger uploads, and finding LEDs takes ~2x longer.
+    walk_full_resolution: bool = False
 
 
 class Timer(BaseModel):

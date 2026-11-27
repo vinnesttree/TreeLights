@@ -13,6 +13,7 @@ export function setupPage(): Page {
       const ledInput = h("input", { type: "number", min: "1", max: "4096" }) as HTMLInputElement;
       const powerInput = h("input", { type: "number", min: "0", step: "100", placeholder: "use WLED's limit" }) as HTMLInputElement;
       const thorough = h("input", { type: "checkbox" }) as HTMLInputElement;
+      const fullRes = h("input", { type: "checkbox" }) as HTMLInputElement;
       // Home Assistant (MQTT)
       const mqttOn = h("input", { type: "checkbox" }) as HTMLInputElement;
       const mqttHost = h("input", { placeholder: "192.168.1.10 or homeassistant.local", inputmode: "url" }) as HTMLInputElement;
@@ -33,6 +34,7 @@ export function setupPage(): Page {
         ledInput.value = String(cfg.wled.led_count);
         powerInput.value = cfg.power.max_current_ma ?? "";
         thorough.checked = !!cfg.capture.thorough;
+        fullRes.checked = !!cfg.capture.walk_full_resolution;
         mqttOn.checked = !!cfg.mqtt.enabled;
         mqttHost.value = cfg.mqtt.host ?? "";
         mqttPort.value = String(cfg.mqtt.port);
@@ -92,7 +94,7 @@ export function setupPage(): Page {
           tree_height_cm: heightInput.value ? Number(heightInput.value) : null,
           wled: { led_count: Number(ledInput.value) || 600 },
           power: { max_current_ma: powerInput.value === "" ? null : Number(powerInput.value) },
-          capture: { thorough: thorough.checked },
+          capture: { thorough: thorough.checked, walk_full_resolution: fullRes.checked },
         };
         try {
           await api("/api/config", { method: "PUT", body: patch });
@@ -176,6 +178,7 @@ export function setupPage(): Page {
           h("label", {}, "Current limit for the test animation (mA)"),
           powerInput,
           h("label", {}, h("span", { class: "row" }, thorough, "Thorough capture: also try every LED the binary pass missed (slower)")),
+          h("label", {}, h("span", { class: "row" }, fullRes, "Walk-around at full resolution (1920x1080): for dense trees (over ~1000 LEDs); bigger uploads, slower processing")),
           h("div", { class: "row", style: { marginTop: "10px" } }, h("button", { class: "primary", onclick: save }, "Save")),
         ),
         h("div", { class: "card" },

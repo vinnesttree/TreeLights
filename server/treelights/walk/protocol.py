@@ -1,7 +1,7 @@
 """Walk-around WebSocket protocol (/ws/walk, architecture §7.9).
 
 Phone -> server (JSON text unless noted):
-  hello     {role:"walk", scan?, view?, camera:{width, height, device}}
+  hello     {role:"walk", scan?, view?, camera:{width, height, device, full_resolution?}}
             (view: reconnecting to a walk in progress)
   start     {camera?}                         start the LED pattern; a new view
   motion    {t:[s...], q:[[x,y,z,w]...]}      orientation samples, phone clock (s)

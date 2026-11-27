@@ -23,7 +23,14 @@ from ..capture.store import Scan
 from ..reconstruction.job import run_solve
 from .process import analyze, frames_from_images
 
-MAX_VIDEO_WIDTH = 1280  # larger videos are downscaled for blob detection
+MAX_VIDEO_WIDTH = 1280  # larger videos are downscaled for blob detection, unless recorded at full resolution
+
+
+def video_max_width(view: dict) -> int | None:
+    """How wide the recording may be for finding LEDs: None (its own size) for walks recorded
+    with the full-resolution option. Downscaling a 1080p recording loses the LEDs' dim slots
+    (in simulation almost nothing decoded), so those walks keep their resolution."""
+    return None if (view.get("camera") or {}).get("full_resolution") else MAX_VIDEO_WIDTH
 
 
 def load_motion(d: Path) -> tuple[np.ndarray | None, np.ndarray | None]:
@@ -47,7 +54,7 @@ def _live_images(d: Path):
             yield float(rec["t"]), img[..., ::-1]
 
 
-def _video_images(path: Path):
+def _video_images(path: Path, max_width: int | None = MAX_VIDEO_WIDTH):
     import av
     import cv2
 
@@ -59,8 +66,8 @@ def _video_images(path: Path):
                 continue
             img = fr.to_ndarray(format="rgb24")
             h, w = img.shape[:2]
-            if w > MAX_VIDEO_WIDTH:
-                img = cv2.resize(img, (MAX_VIDEO_WIDTH, round(h * MAX_VIDEO_WIDTH / w)), interpolation=cv2.INTER_AREA)
+            if max_width and w > max_width:
+                img = cv2.resize(img, (max_width, round(h * max_width / w)), interpolation=cv2.INTER_AREA)
             yield float(fr.time), img
 
 
@@ -118,7 +125,7 @@ def process_walk(scan_root: str, vid: str, tree_height_cm: float | None, prev_ma
     notes = []
     if has_video:
         try:
-            video = frames_from_images(_video_images(Path(video_path)), part(1), n_video)
+            video = frames_from_images(_video_images(Path(video_path), video_max_width(view)), part(1), n_video)
         except Exception as e:  # noqa: BLE001
             notes.append(f"The recording couldn't be decoded ({e}); using the live frames only.")
     elif not video_path:
