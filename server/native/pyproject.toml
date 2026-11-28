@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.16,<2"]
+build-backend = "maturin"
+
+[project]
+name = "treelights-native"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["numpy"]
+
+[tool.maturin]
+module-name = "treelights_native"
+features = ["pyo3/extension-module"]

@@ -554,6 +554,7 @@ The quick reconstruction also predicts which LEDs face the next view, which focu
 The default capture since draft 4. You walk once around the tree with the phone. The camera runs the whole time, and there are no discrete pictures to take. The server works from two sources of the same walk:
 - **live frames**, about 8 per second, streamed while you walk. They drive the feedback on the phone, and are kept for processing;
 - **the recording**, at the camera's full rate (30 fps), made by the browser at the same time and uploaded at the end.
+  - It is 1280x720 at 8 Mbit/s, and larger recordings are downscaled to 1280 px wide before LEDs are found. **Full resolution** (Setup, per tree, off by default) records 1920x1080 at 16 Mbit/s and finds the LEDs at that size, for dense trees (§17). A 1080p recording must not be downscaled: in simulation that lost the LEDs' dim slots and almost nothing decoded.
 
 Both are decoded the same way, and keyframes from both go into one reconstruction.
 
@@ -1105,6 +1106,9 @@ server/treelights/
   sim/               synthetic tree, scene renderer, virtual WLED, virtual phone, virtual walker,
                      synthetic videos, simulated rig
   camcal.py          optional ChArUco camera calibration
+  native.py          loads the native kernels (below), if installed
+server/native/       Rust (PyO3) kernels: bundle adjustment, LED hypotheses, point refinement,
+                     walk tracking. Each has a Python fallback; TREELIGHTS_NATIVE=0 uses it.
 server/tests/        unit, simulator and end-to-end tests
 server/tools/        offline reports and ablations for walks
 web/                 Vite + TypeScript + three.js; one module per page in web/src/pages/
@@ -1199,6 +1203,19 @@ The end-to-end test runs the real server against a virtual phone walking in real
 - **End to end, two trees:** a walk of the second tree while the first runs an effect. The first tree keeps its lease and its LEDs the whole time; maps, scans and on/off stay separate.
 
 **Unit tests:** DDP encoding, the Hamming code, the walk pattern and its decoder (wrong answers never accepted under bit errors and track swaps), timing sync with drift, gyro conventions, tracking with and without the gyro, the detector on recorded frames, chain selection on hand-built chains, bound learning, gap filling, and atomic storage.
+
+**Dense trees, in simulation** (1600 LEDs on a 2.9 m tree, 60 s walks with every fault; walks of one tree solved together as one scan):
+
+| Walks | Measured | Unknown | Error of measured (median / p95) |
+|---|---|---|---|
+| One walk, 1280x720 | 51% | 106 | 0.15 / 0.51 cm |
+| One walk, full resolution (1920x1080) | 67% | 52 | 0.05 / 0.21 cm |
+| One close walk (`WalkConfig.close`), 1280x720 | 69% | 103 | 0.05 / 0.23 cm |
+| Full resolution + close + phone low (15% height) | 85% | 48 | 0.04 / 0.15 cm |
+
+- **What's missed** is mostly the wide bottom of the tree and LEDs deep inside it, hidden by branches, not LEDs crowding each other in the picture.
+- **Live frames** (960 px) decode almost nothing on such a tree from far away; from close they do (573 LEDs).
+- **So for dense trees:** full resolution, and a close walk added to the scan (Re-scan), with a low one if LEDs at the bottom are missing.
 
 **On a real tree** (step 11 of §18, done):
 - **Setup:** 600 WS2811 LEDs on one GPIO output of a WLED controller.

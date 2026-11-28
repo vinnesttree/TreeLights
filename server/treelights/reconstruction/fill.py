@@ -11,6 +11,7 @@ import numpy as np
 from scipy.optimize import least_squares
 from scipy.sparse import lil_matrix
 
+from .. import native
 from .camera import Intrinsics, undistort_normalized
 from .chain import Bounds, slack
 
@@ -56,6 +57,8 @@ def refine_points(pos: dict[int, np.ndarray], support: dict[int, list[tuple[str,
     obs = [(li[l], s, uv) for l in leds for s, uv in support.get(l, [])]
     links = [i for i in leds if i + 1 in li and np.isfinite(bounds.bound[i])]
     scale = 1.0 / (weight_px * bounds.base)  # a violation of 0.5% of the base length ~ 1 px
+    if native.available("refine_points"):
+        return _refine_points_native(leds, li, obs, links, pos, views, bounds, sigma, scale)
     x0 = np.array([pos[l] for l in leds]).ravel()
     vR = {s: v for s, v in views.items()}
 
@@ -82,6 +85,25 @@ def refine_points(pos: dict[int, np.ndarray], support: dict[int, list[tuple[str,
         A[2 * len(obs) + q, 3 * li[i + 1] : 3 * li[i + 1] + 3] = 1
     sol = least_squares(res, x0, jac_sparsity=A, method="trf", x_scale="jac", max_nfev=50)
     P = sol.x.reshape(-1, 3)
+    return {l: P[li[l]] for l in leds}
+
+
+def _refine_points_native(leds, li, obs, links, pos, views, bounds, sigma, scale) -> dict[int, np.ndarray]:
+    """refine_points' least squares in Rust (native/src/hyp.rs): an exact block-tridiagonal
+    Levenberg-Marquardt instead of scipy's sparse finite differences."""
+    vids = sorted({s for _k, s, _uv in obs})
+    vi = {s: k for k, s in enumerate(vids)}
+    cam_r = np.array([views[s].R for s in vids], float).reshape(-1, 3, 3)
+    cam_t = np.array([views[s].t for s in vids], float).reshape(-1, 3)
+    cam_k = np.array([[views[s].K.f, views[s].K.cx, views[s].K.cy, views[s].K.k1, views[s].K.k2] for s in vids],
+                     float).reshape(-1, 5)
+    allowed = np.array([bounds.bound[i] + float(slack(bounds.base, sigma.get(i, 0.0), sigma.get(i + 1, 0.0)))
+                        for i in links], float)
+    P = native.lib.refine_points(
+        cam_r, cam_t, cam_k, np.array([pos[l] for l in leds], float).reshape(-1, 3),
+        np.array([k for k, _s, _uv in obs], np.int64), np.array([vi[s] for _k, s, _uv in obs], np.int64),
+        np.array([uv for _k, _s, uv in obs], float).reshape(-1, 2), np.array([li[i] for i in links], np.int64),
+        allowed, float(scale))
     return {l: P[li[l]] for l in leds}
 
 
@@ -156,6 +178,15 @@ def solve_gap(a: np.ndarray, b: np.ndarray | None, links: list[float], path: np.
     for k, (C, dvec) in rays.items():  # start single-view LEDs on their ray
         v = path[k] - C
         x0[3 * k : 3 * k + 3] = C + max(v @ dvec, 0.0) * dvec
+    if native.available("solve_gap"):
+        # The same problem in Rust (native/src/fill.rs): exact block-tridiagonal steps instead
+        # of a dense finite-difference Jacobian, whose cost grows with the cube of the gap.
+        ks = sorted(rays)
+        return native.lib.solve_gap(
+            np.asarray(a, float), None if b is None else np.asarray(b, float), np.asarray(links, float),
+            np.ascontiguousarray(path, float).reshape(m, 3), x0.reshape(m, 3), np.array(ks, np.int64),
+            np.array([rays[k][0] for k in ks], float).reshape(-1, 3), np.array([rays[k][1] for k in ks], float).reshape(-1, 3),
+            float(scale_ref))
     sol = least_squares(res, x0, method="trf", max_nfev=200)
     return sol.x.reshape(m, 3)
 

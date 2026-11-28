@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
@@ -23,14 +26,37 @@ class WalkResult:
     notes: list[str] = field(default_factory=list)
 
 
+BLOB_THREADS = min(4, os.cpu_count() or 1)
+
+
 def frames_from_images(items: Iterable[tuple[float, np.ndarray]], report: Report | None = None,
-                       total: int | None = None) -> tuple[list[Frame], int, int]:
+                       total: int | None = None, threads: int | None = None) -> tuple[list[Frame], int, int]:
+    """Blobs of every image, in order. Frames are found on threads while the next images
+    are read (OpenCV and most of numpy release the GIL); each frame's blobs depend only on
+    its own image, so the result is the same as one at a time. At most two frames per
+    thread are held at once."""
+    n_threads = BLOB_THREADS if threads is None else threads
     frames, w, h = [], 0, 0
-    for k, (t, img) in enumerate(items):
-        if report is not None and total and k % 25 == 0:
-            report(k / total, f"{k} of {total} frames")
-        h, w = img.shape[:2]
-        frames.append(Frame(float(t), detect_blobs(img)))
+    if n_threads < 2:
+        for k, (t, img) in enumerate(items):
+            if report is not None and total and k % 25 == 0:
+                report(k / total, f"{k} of {total} frames")
+            h, w = img.shape[:2]
+            frames.append(Frame(float(t), detect_blobs(img)))
+        return frames, w, h
+    pending: deque = deque()
+    with ThreadPoolExecutor(n_threads) as ex:
+        for k, (t, img) in enumerate(items):
+            if report is not None and total and k % 25 == 0:
+                report(k / total, f"{k} of {total} frames")
+            h, w = img.shape[:2]
+            pending.append((float(t), ex.submit(detect_blobs, img)))
+            if len(pending) >= 2 * n_threads:
+                tt, fut = pending.popleft()
+                frames.append(Frame(tt, fut.result()))
+        while pending:
+            tt, fut = pending.popleft()
+            frames.append(Frame(tt, fut.result()))
     return frames, w, h
 
 

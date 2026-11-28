@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .. import native
 from .camera import Intrinsics, undistort_normalized
 from .geometry import refine_point, triangulate_rays
 from .sfm import Cameras
@@ -44,10 +45,51 @@ def _project(X: np.ndarray, R: np.ndarray, t: np.ndarray, K: Intrinsics) -> tupl
 
 
 def build_hypotheses(obs: dict[str, dict[int, list[dict]]], cams: Cameras, n_leds: int) -> dict[int, list[Hypothesis]]:
+    if native.available("build_hypotheses"):
+        return _build_hypotheses_native(obs, cams, n_leds)
+    return _build_hypotheses_py(obs, cams, n_leds)
+
+
+def _merge_distance(cams: Cameras) -> float:
+    scene = np.ptp(np.array([cams.center(s) for s in cams.poses]), axis=0).max() or 1.0
+    return 0.004 * scene
+
+
+def _build_hypotheses_native(obs: dict[str, dict[int, list[dict]]], cams: Cameras, n_leds: int) -> dict[int, list[Hypothesis]]:
+    """The same algorithm in Rust (native/src/hyp.rs), LEDs in parallel."""
+    sids = list(cams.poses)
+    Ks = [cams.intrinsics(s) for s in sids]
+    cam_r = np.array([cams.poses[s][0] for s in sids], float).reshape(-1, 3, 3)
+    cam_t = np.array([cams.poses[s][1] for s in sids], float).reshape(-1, 3)
+    cam_k = np.array([[k.f, k.cx, k.cy, k.k1, k.k2] for k in Ks], float).reshape(-1, 5)
+    led, seg, xy, score, sig, dif = [], [], [], [], [], []
+    for si, s in enumerate(sids):
+        for i, cands in obs.get(s, {}).items():
+            for c in cands or []:
+                led.append(int(i))
+                seg.append(si)
+                xy.append((c["x"], c["y"]))
+                score.append(float(c.get("score", 0.5)))
+                sig.append(max(1.0, float(c.get("sigma_px", 1.0))))
+                dif.append(c.get("kind", "point") == "diffuse")
+    xy_a = np.array(xy, float).reshape(-1, 2)
+    h_led, h_x, h_st, off, idx = native.lib.build_hypotheses(
+        cam_r, cam_t, cam_k, np.array(led, np.int64), np.array(seg, np.int64), xy_a, np.array(score, float),
+        np.array(sig, float), np.array(dif, np.uint8), int(n_leds), float(_merge_distance(cams)))
+    out: dict[int, list[Hypothesis]] = {}
+    for k in range(len(h_led)):
+        inl = idx[off[k] : off[k + 1]]
+        err_px, ang, sigma, sc, nerr, diffuse = (float(v) for v in h_st[k])
+        out.setdefault(int(h_led[k]), []).append(Hypothesis(
+            h_x[k].copy(), [sids[seg[j]] for j in inl], [xy_a[j].copy() for j in inl], err_px, ang, sigma, sc,
+            nerr=nerr, diffuse=diffuse))
+    return out
+
+
+def _build_hypotheses_py(obs: dict[str, dict[int, list[dict]]], cams: Cameras, n_leds: int) -> dict[int, list[Hypothesis]]:
     Ks = {s: cams.intrinsics(s) for s in cams.poses}
     out: dict[int, list[Hypothesis]] = {}
-    scene = np.ptp(np.array([cams.center(s) for s in cams.poses]), axis=0).max() or 1.0
-    merge = 0.004 * scene
+    merge = _merge_distance(cams)
     for led in range(n_leds):
         entries = []  # (seg, uv, score, sigma_px, diffuse)
         for s in cams.poses:

@@ -9,6 +9,21 @@ RUN npm ci --no-audit --no-fund
 COPY web/ ./
 RUN npm run build
 
+# The native (Rust) kernels for walk processing and reconstruction, built as a wheel for
+# the target platform (server/native). The full Python image of the same release as the
+# runtime already has a C toolchain and curl, and the wheel matches the runtime's glibc and
+# Python. rustup-init comes from its release location, checked against its published hash.
+FROM python:3.12.8-bookworm AS native
+RUN t="$(uname -m)-unknown-linux-gnu" \
+    && curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init "https://static.rust-lang.org/rustup/dist/$t/rustup-init" \
+    && echo "$(curl --proto '=https' --tlsv1.2 -sSf "https://static.rust-lang.org/rustup/dist/$t/rustup-init.sha256" | cut -d' ' -f1)  /tmp/rustup-init" | sha256sum -c - \
+    && chmod +x /tmp/rustup-init && /tmp/rustup-init -y --profile minimal --default-toolchain 1.97.0 && rm /tmp/rustup-init \
+    && /root/.cargo/bin/rustc --version
+ENV PATH=/root/.cargo/bin:$PATH
+RUN pip install --no-cache-dir maturin==1.16.0
+COPY server/native /native
+RUN cd /native && maturin build --release --locked -o /wheels
+
 FROM python:3.12.8-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -17,6 +32,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY server/requirements.lock ./
 RUN pip install --no-cache-dir -r requirements.lock
+COPY --from=native /wheels /wheels
+RUN pip install --no-cache-dir --no-deps /wheels/*.whl && rm -rf /wheels \
+    && python -c "import treelights_native"
 COPY server/treelights ./treelights
 COPY --from=web /web/dist ./web
 COPY docker/entrypoint.sh /entrypoint.sh

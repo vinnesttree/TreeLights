@@ -10,6 +10,7 @@ comparing the LED's own brightness in the two frames.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import cv2
 import numpy as np
@@ -69,8 +70,17 @@ def value_to_index(v: int) -> int:
 
 
 def code_table(n: int) -> np.ndarray:
-    """(n, 16) codewords for LED indices 0..n-1."""
-    return np.stack([encode(index_to_value(i)) for i in range(n)])
+    """(n, 16) codewords for LED indices 0..n-1 (read-only: the table is shared)."""
+    return _code_table(n)
+
+
+@lru_cache(maxsize=8)
+def _code_table(n: int) -> np.ndarray:
+    # Decoding asks for the table once per track: building it each time was most of the
+    # decoding time of a 600-LED walk.
+    t = np.stack([encode(index_to_value(i)) for i in range(n)])
+    t.setflags(write=False)
+    return t
 
 
 def pattern_frames(n: int, rgb: tuple[int, int, int]) -> list[np.ndarray]:
