@@ -218,7 +218,10 @@ def simulate(tree: SynthTree, cfg: WalkConfig, faults: Faults, out_video: str | 
         stream.width, stream.height = width, height
         stream.pix_fmt = "yuv420p"
         stream.time_base = Fraction(1, 90000)
-        stream.options = {"crf": "18", "preset": "veryfast"}
+# One encoder thread: libx264's multi-threaded output depended on what the process had
+        # encoded before (another simulated walk), so a test's recording, and with it its
+        # result, changed with the tests run before it.
+        stream.options = {"crf": "18", "preset": "veryfast", "threads": "1"}
     last_pts = -1
     for t in times:
         k = int(np.floor((t - cfg.latency_s) / T_SLOT))

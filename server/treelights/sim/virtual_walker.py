@@ -133,7 +133,7 @@ class VirtualWalker:
             s = c.add_stream("libx264", rate=int(cfg.fps))
             s.width, s.height, s.pix_fmt = w, h, "yuv420p"
             s.time_base = Fraction(1, 90000)
-            s.options = {"crf": "18", "preset": "veryfast"}
+            s.options = {"crf": "18", "preset": "veryfast", "threads": "1"}  # deterministic (see sim/walksim.py)
             last = -1
             for vt, leds, (tv, R, tt, blur) in zip(self.rec.video_t, self.rec.states, self.rec.poses):
                 if cfg.video_drop and self.rng.random() < cfg.video_drop:

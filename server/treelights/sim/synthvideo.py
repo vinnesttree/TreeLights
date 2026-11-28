@@ -25,7 +25,8 @@ def write_video(path: str, scene: Scene, view: View, tl: Timeline, lead_s: float
         st.width, st.height = scene.width, scene.height
         st.pix_fmt = "yuv420p"
         st.time_base = Fraction(1, 90000)
-        st.options = {"crf": "18", "preset": "veryfast"} if codec == "libx264" else {}
+        # One thread: deterministic output (see sim/walksim.py).
+        st.options = {"crf": "18", "preset": "veryfast", "threads": "1"} if codec == "libx264" else {}
         t = 0.0
         last_pts = -1
         frames = 0
