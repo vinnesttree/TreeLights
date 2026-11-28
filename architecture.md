@@ -1,6 +1,6 @@
 # TreeLights — Architecture
 
-**Status: DRAFT 4 — implemented.** Draft 4 makes walking around the tree with the phone the default way to capture (§7.1, §7.9). All build steps of §18 are done. Steps 1–10 and 12 are tested in simulation. Step 11, validation on a real tree, is done: a walk-around scan of 600 WS2811 LEDs on one WLED output, with a Samsung Galaxy Z Fold7, placed 595 LEDs with high confidence and the other 5 within a few cm (§17). After draft 4, an effect library and on/off timers with Home Assistant were added (§12, §12.1). Changes made during implementation are noted where they apply.
+**Status: DRAFT 4 — implemented.** Draft 4 makes walking around the tree with the phone the default way to capture (§7.1, §7.9). All build steps of §18 are done. Steps 1–10 and 12 are tested in simulation. Step 11, validation on a real tree, is done: a walk-around scan of 600 WS2811 LEDs on one WLED output, with a Samsung Galaxy Z Fold7, placed 595 LEDs with high confidence and the other 5 within a few cm (§17). After draft 4, an effect library and on/off timers with Home Assistant were added (§12, §12.1), and then several WLED controllers per tree and several trees (§5.5), tested in simulation only. Changes made during implementation are noted where they apply.
 
 | Revision | Changes |
 |---|---|
@@ -13,7 +13,7 @@
 
 | Topic | Decision |
 |---|---|
-| Hardware | About 600 LEDs on one ESP32 running stock WLED. One frame is two DDP packets: 480 + 120 LEDs. Tested with 600 WS2811 LEDs on one GPIO output. |
+| Hardware | About 600 LEDs on one ESP32 running stock WLED. One frame is two DDP packets: 480 + 120 LEDs. Tested with 600 WS2811 LEDs on one GPIO output. *Added later:* a tree's LEDs can be split over several controllers, and one server can drive several trees (§5.5). Only tested in simulation. |
 | Distance bound between consecutive LEDs (`d_max`) | **Dynamic.** Learned from the measurements for each link of the chain, not typed in (§10). |
 | Reference length | The tree's height, measured from the lowest light to the highest light (§9.10). |
 | Phone | Android, using the Chrome browser. No native app. |
@@ -48,11 +48,11 @@
     - A finger paints on the 3D view (where it meets the surface model) or on the unwrapped surface (u, v as in §12).
     - The brush colors every LED within its radius of the stroke: in map coordinates, or along the surface. The radius is a fraction of the tree's height. LEDs without a position stay off.
     - On the tree, the picture runs as the library effect `drawing` (`drawing.py`, `effects/drawing.py`). It has the same lease, brightness and power cap as every effect, and the same rules as §12.1: a capture holding the LEDs refuses it (`LightsBusy`), and the picture is kept for later.
-    - Saved drawings are still scenes, one color per LED, in `/data/drawings/`.
+    - Each tree has its own picture and saved drawings. Saved drawings are still scenes, one color per LED, in the tree's folder (`/data/trees/<id>/drawings/`).
+  - **several WLED controllers** per tree, as one index space, and **several trees**, each with its own maps, effect, drawing, timers and Home Assistant light (§5.5).
 
 **Later.** The map format and the effect interface are designed for these, but they aren't built now:
-- WLED ledmap export;
-- multiple controllers.
+- WLED ledmap export.
 
 **Design principles.** Each one answers failures listed in §3.
 
@@ -171,16 +171,16 @@ flowchart LR
     subgraph Main["Main process - light work only"]
       API["FastAPI<br/>HTTPS, REST, WebSockets"]
       SES["Capture sessions<br/>walk-around and tripod"]
-      MON["WLED monitor"]
+      MON["WLED monitor<br/>one per controller"]
     end
-    OUT["Output thread<br/>lease, keepalive, test animation, DDP"]
+    OUT["Output thread, one per tree<br/>lease, keepalive, effects, DDP"]
     subgraph Workers["Worker processes"]
       DET["Detection and decoding"]
       REC["Reconstruction and chain solve"]
     end
     DATA[("/data volume<br/>scans, maps, certificates, config")]
   end
-  WLED["ESP32 with stock WLED"] --> LEDS["~600 LEDs on the tree"]
+  WLED["ESP32s with stock WLED<br/>one or more per tree"] --> LEDS["LEDs on the tree(s)"]
   CAP <-->|WSS frames, orientation, status| API
   CAP -->|HTTPS resumable video upload| API
   UI <-->|HTTPS and WSS| API
@@ -196,8 +196,10 @@ flowchart LR
 
 One container runs three kinds of work, kept apart:
 - **Main process.** Light work only: the API, capture sessions and WLED monitoring.
-- **Output thread.** The only code that sends LED data. It never waits on anything else.
-- **Worker processes.** All heavy computation.
+- **Output thread.** The only code that sends LED data. It never waits on anything else. There is one per tree.
+- **Worker processes.** All heavy computation, shared by all trees.
+
+**Trees and controllers** (§5.5). One server drives one tree or several. Each tree has its own controllers, output thread, lease, captures, maps, effect, timers and Home Assistant light. A tree's LEDs can be split over several WLED controllers; they form one index space.
 
 Whenever the server stops sending, WLED returns to its own effects, so a crash never leaves the tree dark.
 
@@ -214,11 +216,12 @@ Whenever the server stops sending, WLED returns to its own effects, so a crash n
 
 - **Calibration frames are sent twice**, a few milliseconds apart. Re-sending the same frame is harmless.
 - **The test animation runs at 40 fps.** 600 WS281x LEDs take about 18 ms to receive their data, so about 55 fps is the hardware ceiling.
+- **Several controllers** (§5.5): each gets its slice of every frame, sent back to back from the same output thread.
 
 ### 5.2 Discovery, identity and setup checks
 
 - **Identity.** A controller is identified by its MAC address from `/json/info`, not by its IP. If the IP stops answering, the server rediscovers controllers via mDNS and matches the MAC.
-- **Setup checks**, shown as a checklist:
+- **Setup checks**, shown as a checklist. With several controllers they run for each one, and each line names its controller and LED range:
   - Firmware version (warn below 0.14), LED count, and the configured current limit.
   - From `/json/cfg`, when readable: LED outputs (start and length per GPIO pin), color order, skipped or reversed LEDs, and realtime settings. Output boundaries become chain breaks (§10.3). Key names vary between WLED versions; a missing key shows as "unknown", never as an error.
   - **Realtime check:** send a DDP frame, then confirm that `/json/info` reports realtime mode from this server's IP.
@@ -227,14 +230,14 @@ Whenever the server stops sending, WLED returns to its own effects, so a crash n
 
 ### 5.3 Monitoring during sessions
 
-While the server holds the output, it polls `/json/info` about every 3 s:
+While the server holds the output, it polls `/json/info` of each of the tree's controllers about every 3 s. With several controllers, every event names the controller:
 - **Realtime source isn't this server.** Something else is sending, so pause and tell the user.
 - **Uptime went down.** The controller rebooted, often from a power problem. Pause, and re-capture the frames taken since the last good check.
 - **Unreachable.** Pause and rediscover (§5.2).
 
 ### 5.4 Output lease and keepalive
 
-- **One owner at a time,** in priority order: calibration > identify LED > test animation > nobody. A second client asking for the output is told it's busy.
+- **One owner at a time, per tree,** in priority order: calibration > identify LED > test animation > nobody. A second client asking for the same tree's output is told it's busy. Each tree has its own lease and output thread, so scanning one tree never blocks effects on another (§5.5).
 - **Each lease has a time limit and is renewed while its owner is active:** a tripod capture with each frame received (30 s), a walk with each live frame, an effect while it runs. If the owner disappears, the lease runs out.
 - **Keepalive.** While a client holds the lease, the output thread resends the current frame every 0.5 s, whatever else is happening.
 - **Nobody holding the lease:** the server stops sending, and WLED returns to its own effects after its timeout.
@@ -242,6 +245,40 @@ While the server holds the output, it polls `/json/info` about every 3 s:
   - It is restored at the end of the view or walk, at shutdown, or at the next start-up after a crash.
   - The file is removed only once WLED has accepted the restore, so a failed restore is retried.
   - A saved state from a different controller is discarded, not applied.
+  - With several controllers, each has its own file: `wled_restore.json` for the first, `wled_restore_<k>.json` for controller *k*. They are in the tree's folder (§13).
+
+### 5.5 Several controllers and several trees
+
+*Added after draft 4. Tested in the simulator only (§17).*
+
+**Same tree, several controllers.** A tree's LEDs can be split over several WLED controllers, for example 600 LEDs on each of two ESP32s.
+- **One index space.** The controllers are in a set order. The first drives global LEDs 0 … n₁−1, the second n₁ … n₁+n₂−1, and so on. You set the order and each controller's LED count on the Setup page.
+- **Everything above the output uses global indices:** maps, scans, captures, effects, identify, re-scan. Only the sender splits a frame into the controllers' slices (`wled/group.py`). A tree with one controller works exactly as before.
+- **One map.** A walk or tripod scan blinks and lights LEDs on all controllers at once, and the result is one map of the whole tree.
+- **Boundaries are chain breaks.** No wire joins the last LED of one controller to the first of the next, so each boundary is a break with no bound (§10.3), like a boundary between GPIO outputs.
+
+**Timing between controllers.** Each controller receives its packets over its own WiFi path, so they switch frames at slightly different times.
+- **Sending.** The output thread sends every controller's data packets first, then all PUSH packets back to back. The controllers are told to show a frame within a fraction of a millisecond of each other. What remains is the difference in network and processing delay.
+- **Walk-around capture.** The decoder only uses frames in the middle 60% of each 200 ms slot (§7.9), so a delay difference of up to about 40 ms between controllers changes no bit vote. The end-to-end test runs with one controller 20 ms behind the other (§17).
+- **Tripod capture.** Every frame is checked anyway (§7.4). A frame taken before a slower controller switched shows no new LED or the previous one, and is rejected and retried with a longer wait. It costs time, never an identity.
+- **Checked afterwards.** Each new map reports how many LEDs of each controller it placed. A controller far behind the others gets a warning: it probably didn't show the pattern (not receiving, another sender, or too late).
+
+**Power.** Each controller has its own supply, so the power cap is applied per controller: its own limit if set, else the tree's limit, else the limit WLED reports (§12).
+
+**Several trees.** One server can drive several independent trees.
+- **Each tree has its own** controllers, scans, maps and active map, effect, brightness, on/off state, timers, Home Assistant light and data folder (§13).
+- **One owner at a time per tree.** Each tree has its own output thread and lease (§5.4). Scanning one tree doesn't block the others: another tree keeps its effect, or is scanned with a second phone.
+- **A controller belongs to one tree.** The settings refuse a controller (by address or MAC) that is already in another tree, or listed twice.
+- **The web app** has a tree menu at the top. Every page acts on the chosen tree (§15).
+- **The API** takes the tree as a parameter; without one, it acts on the first tree, so single-tree clients keep working (§16).
+- **Removing a tree** keeps its folder, renamed to `trees/.removed/<id>-<time>`. The first tree can't be removed.
+
+**Upgrading from one tree.** At the first start of this version, the existing configuration and data become the first tree, `tree1`, without any action:
+1. `config.json` is copied to `config.v1.json`.
+2. `scans/`, `maps/`, `lights.json`, `wled_restore.json`, `drawing.json` and `drawings/` are moved into `trees/tree1/` by rename. Nothing that exists there already is overwritten.
+3. `config.json` is rewritten in the new format, atomically, only after everything has moved.
+
+Each step can be repeated, so a crash in between finishes the move at the next start. A tree with one controller keeps its WLED fingerprint, so existing maps stay valid (§11.4).
 
 ## 6. Deployment and runtime
 
@@ -273,7 +310,7 @@ While the server holds the output, it polls `/json/info` about every 3 s:
 ### 6.2 Process model
 
 - **Main process (asyncio):** the HTTP and WebSocket API, the capture session state machines, and the WLED monitor. Light work only.
-- **Output thread:** the DDP sender, the keepalive and the test animation renderer. Rendering 600 LEDs with numpy is trivial. Its timing never depends on the event loop.
+- **Output thread,** one per tree: the DDP sender, the keepalive and the test animation renderer. Rendering 600 LEDs with numpy is trivial. Its timing never depends on the event loop.
 - **Worker processes (pool):** image and video decoding, detection, binary decoding and reconstruction. Frames are passed as file paths, and results come back as small messages.
 - **A reconstruction can take seconds to a minute,** but it can never delay a DDP packet.
 
@@ -304,7 +341,7 @@ Chrome only allows camera access on secure (HTTPS) pages. The setup works like t
 
 ### 7.1 User flow
 
-1. **Setup:** pick the WLED controller, run the checks, enter the tree height.
+1. **Setup:** pick the WLED controller (or several, in order, §5.5), run the checks, enter the tree height.
 2. **Scan (draft 4, the default).** Open the Scan page on the phone and walk once around the tree with the camera running (§7.9):
    1. Dim the room, and stand far enough back that the whole tree fits in the picture.
    2. Tap **Start**. Every LED starts blinking its own index. The camera locks exposure and focus, recording starts, and frames stream to the server.
@@ -517,7 +554,7 @@ The quick reconstruction also predicts which LEDs face the next view, which focu
 The default capture since draft 4. You walk once around the tree with the phone. The camera runs the whole time, and there are no discrete pictures to take. The server works from two sources of the same walk:
 - **live frames**, about 8 per second, streamed while you walk. They drive the feedback on the phone, and are kept for processing;
 - **the recording**, at the camera's full rate (30 fps), made by the browser at the same time and uploaded at the end.
-  - It is 1280x720 at 8 Mbit/s, and larger recordings are downscaled to 1280 px wide before LEDs are found. **Full resolution** (Setup, off by default) records 1920x1080 at 16 Mbit/s and finds the LEDs at that size, for dense trees (§17). A 1080p recording must not be downscaled: in simulation that lost the LEDs' dim slots and almost nothing decoded.
+  - It is 1280x720 at 8 Mbit/s, and larger recordings are downscaled to 1280 px wide before LEDs are found. **Full resolution** (Setup, per tree, off by default) records 1920x1080 at 16 Mbit/s and finds the LEDs at that size, for dense trees (§17). A 1080p recording must not be downscaled: in simulation that lost the LEDs' dim slots and almost nothing decoded.
 
 Both are decoded the same way, and keyframes from both go into one reconstruction.
 
@@ -800,6 +837,9 @@ This step picks at most one hypothesis per LED, so that the whole chain respects
 - Boundaries between WLED outputs, read from `/json/cfg`.
   - A break is placed before each output's start index. If outputs leave unused indices between them, those LEDs are never seen, and the break falls after the gap rather than at the end of the previous output. Number the outputs contiguously.
   - Several outputs are tested in the simulator only; the real tree used one output.
+- Boundaries between WLED controllers of one tree (§5.5), shown as `controller` breaks.
+  - Each controller's own output boundaries are shifted into the tree's index space.
+  - Tested in the simulator only.
 - Trusted links longer than 3·L.
 - Links you mark as breaks on the Map page.
 
@@ -850,6 +890,7 @@ Each map stores the controller's MAC address and a hash of its LED-output and re
 - **When it's checked:** at start-up (logged), whenever a page reads the server state, and before activation.
 - **What's compared:** the active map's MAC, LED count and hash against the live controller.
 - **A mismatch** shows a warning on the home, Map and Test pages that says what changed: another controller, a different LED count, or changed outputs or realtime settings. Activating a mismatching map needs a confirmation.
+- **Several controllers** (§5.5). The map also lists every controller in order, with its MAC, first index, LED count and own hash. The tree's hash covers all of them, in order, so swapping two controllers changes it. The check names the controller that changed, or says that the number of controllers changed. With one controller, the hash is the same as before, so maps made before several controllers existed stay valid.
 
 ### 11.5 Re-scan and maintenance
 
@@ -898,14 +939,15 @@ Use the same flow when the tree has settled or been bumped.
 - **Power cap.**
   - Each frame's current draw is estimated from its RGB values, using a configurable mA per channel.
   - Brightness is scaled down to stay within WLED's configured limit (from `/json/info`), or a limit set in Setup.
+  - With several controllers, per controller: each slice is scaled to its own controller's limit (§5.5).
 
 ### 12.1 On/off, timers and Home Assistant
 
 *Added after draft 4.*
 
-- **One light** (`lights.py`). The tree is one light that is on or off.
+- **One light per tree** (`lights.py`). Each tree is one light that is on or off, with its own effect, brightness, timers and Home Assistant entity (§5.5).
   - *On* runs a library effect under the output lease (`test` kind). Its parameters and brightness are remembered in `lights.json`.
-  - *Off* releases the lease and sets WLED's own `on` to false. Releasing alone would show WLED's own effect.
+  - *Off* releases the lease and sets WLED's own `on` to false, on every controller of the tree. Releasing alone would show WLED's own effect.
   - Captures take priority: switching while a `calibration` or `identify` lease is held is refused, never pre-empting a scan.
   - The effect's lease (TTL 1 h) is renewed every 30 s while on. Before this, effects stopped after an hour.
   - The on state survives a restart.
@@ -915,6 +957,7 @@ Use the same flow when the tree has settled or been bumped.
   - Event times are computed per local date and compared in UTC, so DST changes neither skip nor repeat a timer.
   - Each check applies only the last event since the previous check. At start-up, the window starts at the last on/off change (at most 24 h back), so a timer missed while the server was down still takes effect, but a later manual change wins.
 - **Home Assistant** (`homeassistant.py`): MQTT discovery through paho-mqtt.
+  - One device per tree, each with its own topic: `treelights` for the first tree, `treelights_<id>` by default for trees added later. The broker settings are shared.
   - Entities: a JSON-schema light (brightness, effect list, RGB = Color 1), a palette select, speed and intensity numbers, a schedule switch and a next-timer sensor.
   - States are retained, and published on every change and every 15 s. A last-will marks the device offline.
   - Everything is announced again when Home Assistant publishes `online` on `<prefix>/status`.
@@ -923,23 +966,33 @@ Use the same flow when the tree has settled or been bumped.
 
 ```
 /data/
-  config.json
+  config.json                server-wide settings and every tree's settings (format 2)
+  config.v1.json             the single-tree config.json, kept by the upgrade (§5.5)
   tls/                       local CA and server certificate
-  wled_restore.json          WLED state saved while calibration changes it (§5.4)
-  scans/<scan>/
-    scan.json                settings, segments, camera info
-    events.jsonl             append-only session log
-    detections.jsonl         append-only per-frame results
-    overrides.json           your edits (§11.3)
-    frames/<segment>/*.jpg   raw frames
-    walk/<view>/             walk-around capture (§7.9)
-      live.jsonl, live/*.jpg   live frames with phone time and orientation
-      motion.jsonl             orientation samples
-      observations.json        decoded keyframes, reused by later solves
-    videos/<view>.upload     uploaded recordings
-  maps/<map>/map.json        immutable versions
-  maps/active                pointer to the active version
+  camera_profiles.json, camcal/  camera calibrations (§9.2), shared by all trees
+  jobs/                      progress of running jobs
+  trees/<tree>/              one folder per tree; the first tree is tree1
+    lights.json              on/off, effect and brightness (§12.1)
+    drawing.json, drawings/  the Draw page's picture, and saved drawings
+    wled_restore.json        WLED state saved while calibration changes it (§5.4);
+                             wled_restore_<k>.json for controller k
+    scans/<scan>/
+      scan.json              settings, segments, camera info, controllers
+      events.jsonl           append-only session log
+      detections.jsonl       append-only per-frame results
+      overrides.json         your edits (§11.3)
+      frames/<segment>/*.jpg raw frames
+      walk/<view>/           walk-around capture (§7.9)
+        live.jsonl, live/*.jpg  live frames with phone time and orientation
+        motion.jsonl            orientation samples
+        observations.json       decoded keyframes, reused by later solves
+      videos/<view>.upload   uploaded recordings
+    maps/<map>/map.json      immutable versions
+    maps/active.json         pointer to the active version
+  trees/.removed/<tree>-<time>/  removed trees, kept
 ```
+
+- **Before several trees,** `scans/`, `maps/`, `lights.json`, `wled_restore.json`, `drawing.json` and `drawings/` were directly in `/data`. The upgrade moves them into `trees/tree1/` (§5.5).
 
 - **Crash safety.**
   - JSON files are written atomically (temp file, fsync, rename), and logs are append-only.
@@ -953,7 +1006,7 @@ Use the same flow when the tree has settled or been bumped.
 
 ## 14. Map file format
 
-`/data/maps/<map>/map.json`:
+`/data/trees/<tree>/maps/<map>/map.json`:
 
 ```json
 {
@@ -968,7 +1021,7 @@ Use the same flow when the tree has settled or been bumped.
   "chain": {
     "base_link": 9.6,
     "long_links": [{ "from": 49, "bound": 21.0 }],
-    "breaks": [{ "from": 299, "reason": "wled_output_boundary" }],
+    "breaks": [{ "from": 299, "reason": "break_output" }],
     "link_bounds": [10.6, 10.6, "…", null, "…"],
     "cap": null
   },
@@ -988,6 +1041,17 @@ Use the same flow when the tree has settled or been bumped.
 ```
 
 - **Status values:** `measured`, `single_view`, `estimated`, `unknown`, and `manual` (placed by you).
+- **Break reasons:** `break_output` (between WLED outputs), `break_controller` (between controllers, §5.5), `break_data` (learned), `break_user` (yours).
+- **Several controllers** (§5.5). `wled` then also lists the controllers in index order, and `quality.controllers` the share of each controller's LEDs that the map placed:
+  ```json
+  "wled": { "mac": "aabbccddee01", "led_count": 1200, "config_hash": "sha256:9c1e...",
+            "controllers": [
+              { "mac": "aabbccddee01", "host": "10.0.0.21", "start": 0,   "led_count": 600, "config_hash": "sha256:3f2a..." },
+              { "mac": "aabbccddee02", "host": "10.0.0.22", "start": 600, "led_count": 600, "config_hash": "sha256:77b0..." } ] },
+  "quality": { "controllers": [ { "controller": 1, "start": 0,   "count": 600, "placed": 0.98 },
+                                { "controller": 2, "start": 600, "count": 600, "placed": 0.97 } ] }
+  ```
+  LED indices (`i`) are global: LED 600 is the first LED of the second controller.
 - **`sigma`** is the uncertainty radius, in map units.
 - **Exports:** this JSON, and CSV (`i, x, y, z, status, sigma`).
 
@@ -997,7 +1061,7 @@ The web app is phone-first, built with TypeScript, Vite and three.js, and served
 
 | Page | Purpose |
 |---|---|
-| Setup | Controller discovery and checks, tree height, network and HTTPS help, power limit. |
+| Setup | Trees (add, rename, remove); the tree's controllers, their order and LED counts; discovery and checks; tree height, network and HTTPS help, power limit. |
 | Scan | **The default (draft 4).** Walk-around capture: live camera, recording, orientation sensor, coverage ring, warnings, upload, then the map's summary (§7.9). |
 | Calibrate | Advanced, tripod: camera setup, capture progress, live detection overlay, warnings, coverage guidance, video upload. |
 | Control | Advanced, tripod: runs on any other browser; start the next view, see progress and "turn the tree by N°" guidance without touching the tripod phone. |
@@ -1008,13 +1072,16 @@ The web app is phone-first, built with TypeScript, Vite and three.js, and served
 | Draw | Paint on the tree with a finger, on the 3D view or the unwrapped surface: brush color and size, eraser, undo, clear, fill; the LEDs follow live. Saved drawings. |
 | Schedule | Switch the lights on and off; timers at set times or relative to sunrise and sunset; time zone and location. |
 
+**Several trees** (§5.5). With more than one tree, a menu at the top chooses the tree. Every page then acts on it; the choice is kept per browser. A link can name the tree (`#/scan?tree=tree2`), for example for the phone.
+
 ## 16. Server layout and API
 
 ```
 server/treelights/
   app.py             FastAPI app, routes, static files, worker processes for jobs
   bootstrap.py       plain-HTTP setup page (§6.3)
-  config.py          settings (/data/config.json)
+  config.py          settings (/data/config.json), trees, upgrade from a single tree (§5.5)
+  tree.py            one tree: its controllers, output, captures, maps, lights, timers, Home Assistant
   storage.py         atomic writes, append-only logs, retention
   tls.py             local CA and certificates
   progress.py        progress of jobs running in worker processes
@@ -1022,8 +1089,9 @@ server/treelights/
   lights.py          on/off and the running effect (§12.1)
   schedule.py, sun.py  timers, sunrise and sunset
   homeassistant.py   Home Assistant over MQTT discovery
-  drawing.py         drawing from the phone: brush, undo, saved drawings
-  wled/              DDP, JSON API client, discovery, monitor, config fingerprint
+  drawing.py         drawing from the phone: brush, undo, saved drawings (one per tree)
+  wled/              DDP, JSON API client, discovery, monitor, config fingerprint; group.py: several
+                     controllers as one index space, sliced sending, per-controller power cap
   output/            lease, output thread, keepalive, renderer, power cap
   capture/           session state machines, protocol, capture plans, codes, verification
   walk/              walk-around capture: pattern, blobs, timing, tracking, gyro calibration,
@@ -1049,9 +1117,12 @@ docker/              Dockerfile, docker-compose.yml (pulls the published image),
 
 **API (sketch):**
 
-- **Server:** `GET /api/health`, `GET /api/state` (including who holds the output), `POST /api/auth` (the optional PIN)
-- **Config:** `GET`/`PUT /api/config`
-- **WLED:** `GET /api/wled/discover`, `POST /api/wled/select`, `GET /api/wled/checks`, `POST /api/wled/identify {index}`
+- **Which tree** (§5.5): every route below except health, auth, camera calibration and jobs by id acts on one tree: the one named by `?tree=<id>`, the `X-TreeLights-Tree` header or the path prefix `/api/trees/<id>/…` (`/ws/trees/<id>/…` for WebSockets), else the first tree. Clients written for one tree keep working unchanged.
+- **Trees:** `GET`/`POST /api/trees {name?}`, `PUT /api/trees/{tree} {name}`, `DELETE /api/trees/{tree}`
+- **Server:** `GET /api/health`, `GET /api/state` (including who holds the output, the tree and its controllers), `POST /api/auth` (the optional PIN)
+- **Config:** `GET`/`PUT /api/config`, in the single-tree shape: the server-wide settings and the tree's own; `wled` is the tree's first controller, `controllers` all of them
+- **Controllers:** `GET`/`PUT /api/controllers` (the tree's controllers, in index order, with each one's first and last LED)
+- **WLED:** `GET /api/wled/discover` (with the tree each controller belongs to), `POST /api/wled/select {host, controller? | add?}`, `GET /api/wled/checks` (every controller), `POST /api/wled/identify {index}`
 - **Output lease:** no endpoint of its own. A capture, an effect or *identify* takes the output, renews it while it runs, and releases it when it ends (§5.4).
 - **Scans:** `GET`/`POST /api/scans`, `POST /api/scans/{scan}/open`, `GET /api/scans/{scan}`, `GET`/`PUT /api/scans/{scan}/overrides`
 - **Walk-around capture:** `WSS /ws/walk` (§7.9); then `PUT /api/scans/{scan}/video/{view}/upload?offset=N` (resumable) and `POST /api/scans/{scan}/walk/{view}/process`, which returns a job.
@@ -1070,7 +1141,7 @@ docker/              Dockerfile, docker-compose.yml (pulls the published image),
 
 **Closed-loop simulator.** It is built before detection, and every later step is tested against it. It has three parts:
 - **Synthetic tree:** a cone with branches that block views, and a chain made of strands joined by connector links, with an optional second output. One side can be placed against a wall.
-- **Virtual WLED:** speaks real DDP and a real JSON API on localhost, and keeps the LED state.
+- **Virtual WLED:** speaks real DDP and a real JSON API on localhost, and keeps the LED state. Several can stand for one tree's controllers (`VirtualWledGroup`), each with its own ports, MAC and network delay; the camera sees them as one string.
 - **Virtual phone:** renders frames from the LED state and a camera pose, and talks the real WebSocket protocol.
 
 **Fault injection:**
@@ -1123,6 +1194,14 @@ The end-to-end test runs the real server against a virtual phone walking in real
 - **Live frames alone** give nearly the same map. Still, the recording is the main source: full frame rate and resolution, and fewer blurred frames. The phone retries an interrupted upload before falling back.
 - **End to end** (real server, a virtual phone walking in real time, DDP to a virtual WLED): the maps are as accurate. In this simulation, rendering the full fault scene in real time only reaches about 4 live frames/s. That is too few to decode, so live decoding under faults is tested offline at 8 frames/s.
 
+**Several controllers and trees** (§5.5), in the simulator only:
+- **Unit tests:** global and per-controller indices; slicing a frame into DDP packets per controller, with every PUSH packet sent after all data packets; the power cap per controller; controller boundaries as chain breaks; the tree's WLED fingerprint and the check that names the changed controller; the upgrade from a single-tree data folder, including one interrupted half-way; separate leases per tree; the tree and controller API, and WebSockets per tree.
+- **End to end,** one tree of 150 LEDs split over two virtual controllers (80 + 70 and 90 + 60), the second 20–30 ms slower than the first:
+  - a walk-around scan, ideal configuration: more than 85% of the LEDs measured, and more than 80% of each controller's;
+  - a tripod scan (4 views, 3% packet loss): more than 60% measured as in the single-controller tripod test, more than half of each controller's, and the same position error bounds (median under 1% of the tree's height, maximum under 5%);
+  - both: one map in one index space, a `break_controller` break at the boundary, both controllers in the map's fingerprint, setup checks passing on each controller.
+- **End to end, two trees:** a walk of the second tree while the first runs an effect. The first tree keeps its lease and its LEDs the whole time; maps, scans and on/off stay separate.
+
 **Unit tests:** DDP encoding, the Hamming code, the walk pattern and its decoder (wrong answers never accepted under bit errors and track swaps), timing sync with drift, gyro conventions, tracking with and without the gyro, the detector on recorded frames, chain selection on hand-built chains, bound learning, gap filling, and atomic storage.
 
 **Dense trees, in simulation** (1600 LEDs on a 2.9 m tree, 60 s walks with every fault; walks of one tree solved together as one scan):
@@ -1142,7 +1221,7 @@ The end-to-end test runs the real server against a virtual phone walking in real
 - **Setup:** 600 WS2811 LEDs on one GPIO output of a WLED controller.
 - **Capture:** walk-around (§7.9) with a Samsung Galaxy Z Fold7 in Chrome.
 - **Result:** 595 of 600 LEDs were placed with high confidence. The other 5 were within a few cm of their true positions.
-- **Not yet tested on hardware:** several WLED outputs, tripod capture and recorded-video mode.
+- **Not yet tested on hardware:** several WLED outputs, several controllers per tree, several trees, tripod capture and recorded-video mode. The only real-hardware test was one controller with one output and 600 WS2811 LEDs.
 
 ## 18. Build order
 

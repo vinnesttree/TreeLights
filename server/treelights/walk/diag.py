@@ -223,13 +223,17 @@ def clocks(scan, vid: str, view: dict, d: Path, video: Path) -> None:
 
 
 def run(data: Path, scan_id: str | None, vid: str | None, variants: list[str], use_cache: bool = True,
-        only_clocks: bool = False) -> None:
+        only_clocks: bool = False, tree: str | None = None) -> None:
     from ..capture.store import ScanStore
-    from ..config import ConfigStore
+    from ..config import find_tree
     from ..reconstruction import sfm
     from ..reconstruction.solve import SolveInput, solve
 
-    store = ScanStore(data)
+    try:
+        root, tree_settings = find_tree(data, tree)
+    except Exception as e:  # noqa: BLE001
+        sys.exit(f"Can't read {data / 'config.json'}: {e}")
+    store = ScanStore(root)
     if scan_id is None:
         for s in sorted(store.list(), key=lambda m: m.get("created") or "", reverse=True):
             scan = store.get(s["id"])
@@ -246,10 +250,7 @@ def run(data: Path, scan_id: str | None, vid: str | None, variants: list[str], u
     n = int(scan.meta["led_count"])
     d = scan.root / "walk" / vid
     video = scan.root / "videos" / f"{vid}.upload"
-    try:
-        height = ConfigStore(data).settings.tree_height_cm
-    except Exception:  # noqa: BLE001
-        height = None
+    height = tree_settings.get("tree_height_cm")
     _say(f"Walk {scan_id}/{vid}: {n} LEDs, tree height {height} cm, recording "
          f"{video.stat().st_size / 1e6:.0f} MB" if video.exists() else f"Walk {scan_id}/{vid}: {n} LEDs, no recording")
     clocks(scan, vid, view, d, video)
@@ -350,6 +351,7 @@ def main() -> None:
     p.add_argument("scan", nargs="?")
     p.add_argument("view", nargs="?")
     p.add_argument("--data", default=os.environ.get("TREELIGHTS_DATA", "/data"))
+    p.add_argument("--tree", help="tree id (default: the first tree)")
     p.add_argument("--variants", default=",".join(VARIANTS))
     p.add_argument("--no-cache", action="store_true", help="detect the blobs again instead of using /tmp's copy")
     p.add_argument("--clocks", action="store_true", help="only print the walk's timestamps (quick)")
@@ -358,7 +360,7 @@ def main() -> None:
     bad = [v for v in names if v not in VARIANTS]
     if bad:
         sys.exit(f"unknown variant(s): {', '.join(bad)}; choose from {', '.join(VARIANTS)}")
-    run(Path(a.data), a.scan, a.view, names, use_cache=not a.no_cache, only_clocks=a.clocks)
+    run(Path(a.data), a.scan, a.view, names, use_cache=not a.no_cache, only_clocks=a.clocks, tree=a.tree)
 
 
 if __name__ == "__main__":

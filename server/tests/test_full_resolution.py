@@ -39,3 +39,28 @@ def test_recording_kept_at_full_size_only_when_asked(tmp_path):
     full = [img.shape for _t, img in job._video_images(p, None)]
     assert small and all(s == (720, 1280, 3) for s in small)
     assert full and all(s == (1080, 1920, 3) for s in full)
+
+
+async def test_option_is_per_tree_through_the_api(tmp_path):
+    import concurrent.futures
+
+    import httpx
+
+    from treelights.app import AppState, create_app
+
+    state = AppState(tmp_path / "data", executor=concurrent.futures.ThreadPoolExecutor(1))
+    app = create_app(state)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as http:
+            assert (await http.post("/api/trees", json={"name": "Big tree"})).status_code == 200
+            t2 = {"X-TreeLights-Tree": "tree2"}
+            assert (await http.get("/api/config")).json()["capture"]["walk_full_resolution"] is False
+            r = await http.put("/api/config", json={"capture": {"walk_full_resolution": True}}, headers=t2)
+            assert r.status_code == 200, r.text
+            assert (await http.get("/api/config", headers=t2)).json()["capture"]["walk_full_resolution"] is True
+            assert (await http.get("/api/config")).json()["capture"]["walk_full_resolution"] is False  # tree 1 unchanged
+            # Other capture options of the tree are kept.
+            assert (await http.get("/api/config", headers=t2)).json()["capture"]["thorough"] is False
+    finally:
+        for t in state.trees.values():
+            t.output.stop()

@@ -1,5 +1,5 @@
 import "./style.css";
-import type { Page } from "./api";
+import { api, currentTree, h, setCurrentTree, type Page } from "./api";
 import { setupPage } from "./pages/setup";
 import { calibratePage } from "./pages/calibrate";
 import { controlPage } from "./pages/control";
@@ -41,5 +41,33 @@ function route(): void {
   }
 }
 
-window.addEventListener("hashchange", route);
-route();
+// The tree the pages act on (shown when there is more than one tree).
+const treePick = document.getElementById("tree-pick") as HTMLSelectElement;
+
+async function loadTrees(): Promise<void> {
+  try {
+    const trees = await api<{ id: string; name: string; default: boolean }[]>("/api/trees");
+    const cur = currentTree();
+    const known = trees.some((t) => t.id === cur);
+    if (cur && !known) setCurrentTree(null);
+    treePick.replaceChildren(...trees.map((t) => h("option", { value: t.id }, t.name)));
+    treePick.value = known && cur ? cur : (trees.find((t) => t.default) ?? trees[0]).id;
+    treePick.hidden = trees.length < 2;
+  } catch {
+    treePick.hidden = true;
+  }
+}
+
+treePick.onchange = () => {
+  setCurrentTree(treePick.value);
+  const hash = location.hash.replace(/([?&])tree=[^&]*&?/, "$1").replace(/[?&]$/, "");
+  if (hash !== location.hash) location.hash = hash; // routes again
+  else route();
+};
+
+window.addEventListener("trees-changed", () => void loadTrees());
+window.addEventListener("hashchange", () => {
+  if (/[?&]tree=/.test(location.hash)) void loadTrees(); // a link to another tree's page
+  route();
+});
+loadTrees().finally(route);

@@ -1,4 +1,4 @@
-import { api, fmtErr, h, LiveSocket, type Page } from "../api";
+import { api, fmtErr, h, LiveSocket, withTree, type Page } from "../api";
 import { CameraCapture, MotionSensor, WakeLock } from "../camera";
 import { statusView, type Status } from "./status";
 
@@ -307,7 +307,7 @@ function videoCard(): HTMLElement {
       let { size } = await api(`${base}/upload`);
       while (size < f.size) {
         const body = f.slice(size, Math.min(size + CHUNK, f.size));
-        const res = await fetch(`${base}/upload?offset=${size}`, { method: "PUT", body, credentials: "same-origin" });
+        const res = await fetch(withTree(`${base}/upload?offset=${size}`), { method: "PUT", body, credentials: "same-origin" });
         if (res.ok) size = (await res.json()).size;
         else if (res.status === 409) size = (await api(`${base}/upload`)).size; // resume from the server's size
         else throw new Error(`upload failed (${res.status})`);

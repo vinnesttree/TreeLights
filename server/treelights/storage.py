@@ -36,6 +36,11 @@ def dumps(obj: Any, indent: int | None = None) -> str:
     return json.dumps(obj, default=_json_default, indent=indent, allow_nan=False)
 
 
+def fsync_dir(path: Path) -> None:
+    """Make renames in a folder durable."""
+    _fsync_dir(path)
+
+
 def _fsync_dir(path: Path) -> None:
     try:
         fd = os.open(path, os.O_RDONLY)

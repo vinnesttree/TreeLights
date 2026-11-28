@@ -1,57 +1,54 @@
-"""FastAPI application: REST API, WebSockets, static web app (architecture §15, §16)."""
+"""FastAPI application: REST API, WebSockets, static web app (architecture §15, §16).
+
+Several trees can be served at once (§5.5). Every tree-scoped route acts on the tree
+named by the `tree` query parameter (or the `X-TreeLights-Tree` header, or the
+`/api/trees/<id>/...` and `/ws/trees/<id>/...` path prefix); without one, on the default
+tree, so clients written for a single tree keep working.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import datetime as dt
 import json
 import logging
 import multiprocessing
 import os
+import re
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.requests import HTTPConnection
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import ValidationError
 
 from . import __version__, camcal, progress, storage
 from .capture import video as videomode
-from .capture.session import CaptureSession
-from .capture.store import ScanStore
-from .config import ConfigStore
-from .drawing import Drawing
-from .effects import (EFFECTS, LIBRARY, PALETTE_IDS, DrawingEffect, Identify, TreeGeometry, catalogue, library,
-                      make_renderer)
-from .homeassistant import HomeAssistant
-from .lights import Lights, LightsBusy
-from .maps import guidance as guide
+from .config import TREES_DIR, ConfigStore, tree_dir
+from .effects import catalogue, library
+from .lights import LightsBusy
 from .maps import rescan
-from .maps.store import ActivationBlocked, MapStore, export_csv
-from .output.manager import OutputManager, PowerLimiter
-from .reconstruction.job import run_solve
-from .schedule import Scheduler
+from .maps.store import ActivationBlocked, export_csv
+from .tree import Tree
 from .walk import protocol as walkproto
-from .walk.job import process_walk
-from .walk.session import WalkSession
 from .wled import discovery
-from .wled.brightness import BrightnessGuard
-from .wled.client import config_fingerprint
-from .wled.ddp import UdpFrameSender
-from .wled.link import WledLink, WledMonitor
 
 log = logging.getLogger(__name__)
 
 
 class Job:
-    def __init__(self, kind: str, scan: str, progress_dir: Path | None = None, view: str | None = None):
+    def __init__(self, kind: str, scan: str, progress_dir: Path | None = None, view: str | None = None,
+                 tree: str | None = None):
         self.id = uuid.uuid4().hex[:10]
         self.kind = kind
         self.scan = scan
         self.view = view
+        self.tree = tree
         self.status = "running"
         self.result: Any = None
         self.error: str | None = None
@@ -69,378 +66,144 @@ class Job:
             Path(self.progress_path).unlink(missing_ok=True)
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "kind": self.kind, "scan": self.scan, "view": self.view, "status": self.status,
-                "result": self.result, "error": self.error, "started": self.started, "finished": self.finished,
-                "now": time.time(),
+        return {"id": self.id, "kind": self.kind, "scan": self.scan, "view": self.view, "tree": self.tree,
+                "status": self.status, "result": self.result, "error": self.error, "started": self.started,
+                "finished": self.finished, "now": time.time(),
                 "progress": progress.read(self.progress_path) if self.status == "running" else None}
+
+
+# Attributes of the default tree that AppState passes through, so code and tests written
+# for a single tree (`state.output`, `state.lights`, ...) keep working.
+_TREE_ATTRS = frozenset({
+    "output", "link", "links", "monitor", "monitors", "brightness", "scans", "maps", "session", "walk", "lights",
+    "scheduler", "ha", "guidance", "control_clients", "test_owner", "effect_renderer", "index", "effect_state",
+    "start_effect", "stop_effect", "update_effect", "has_map", "fingerprint", "map_check", "recover", "open_session",
+    "open_walk", "start_solve", "start_walk_processing", "broadcast_status", "_apply_sender", "_apply_power",
+    "reconfigure", "wled_meta", "drawing",
+})
 
 
 class AppState:
     def __init__(self, data_dir: Path, executor: concurrent.futures.Executor | None = None,
                  capture_executor: concurrent.futures.Executor | None = None):
         self.data_dir = Path(data_dir)
-        self.config = ConfigStore(self.data_dir)
-        s = self.config.settings
-        self.output = OutputManager(s.wled.led_count, PowerLimiter(None, s.power.ma_per_channel, s.power.idle_ma_per_led))
-        self.link = WledLink(s.wled.host, s.wled.mac, s.wled.http_port)
-        self.link.on_host_change(lambda h: self._apply_sender())
-        self.monitor = WledMonitor(self.link, lambda: self.output.holder() is not None)
-        self.brightness = BrightnessGuard(self.data_dir, self.link)
+        self.config = ConfigStore(self.data_dir)  # also moves a single-tree install into tree 1 (config.migrate)
         if executor is None:
             ctx = multiprocessing.get_context("spawn")
             executor = concurrent.futures.ProcessPoolExecutor(max_workers=max(1, min(4, (os.cpu_count() or 2) - 1)), mp_context=ctx)
         self.executor = executor
         self.capture_executor = capture_executor or executor
-        self.scans = ScanStore(self.data_dir)
-        self.maps = MapStore(self.data_dir)
         self.profiles = camcal.ProfileStore(self.data_dir)
-        self.session: CaptureSession | None = None
-        self.walk: WalkSession | None = None
         self.jobs: dict[str, Job] = {}
         for stale in (self.data_dir / "jobs").glob("*.json*"):  # progress of jobs from before a restart
             stale.unlink(missing_ok=True)
-        self.guidance: dict | None = None
-        self.control_clients: set[asyncio.Queue] = set()
-        self.test_owner: str | None = None
-        self.effect_renderer = None  # the running library effect, changeable live
-        self.drawing = Drawing(self)  # the picture painted on the Draw page
-        self.lights = Lights(self)  # the tree as one on/off light (timers, Home Assistant)
-        self.scheduler = Scheduler(self.config, self.lights)
-        self.ha = HomeAssistant(self)
-        self._apply_sender()
+        self._started = False
+        self.trees: dict[str, Tree] = {}
+        for tid in self.config.tree_ids():
+            self.trees[tid] = Tree(self, tid)
 
-    # ---- output configuration ------------------------------------------------
-    def _apply_sender(self) -> None:
-        s = self.config.settings
-        host = self.link.host or s.wled.host
-        self.output.set_led_count(s.wled.led_count) if self.output.led_count != s.wled.led_count else None
-        self.output.set_sender(UdpFrameSender(host, s.wled.protocol, s.wled.udp_port) if host else None)
-        self._apply_power()
+    def __getattr__(self, name: str) -> Any:
+        if name in _TREE_ATTRS and "trees" in self.__dict__:
+            return getattr(self.default, name)
+        raise AttributeError(name)
 
-    def _apply_power(self) -> None:
-        s = self.config.settings
-        lim = s.power.max_current_ma
-        if lim is None and self.link.info and self.link.info.max_current_ma:
-            lim = self.link.info.max_current_ma
-        self.output.power = PowerLimiter(lim or None, s.power.ma_per_channel, s.power.idle_ma_per_led)
+    # ---- trees -----------------------------------------------------------------------
+    @property
+    def default(self) -> Tree:
+        return self.trees[self.config.default_tree]
 
-    # ---- sessions ----------------------------------------------------------------
-    def open_session(self, scan_id: str | None = None) -> CaptureSession:
-        if self.session and self.session.busy():
-            raise HTTPException(409, "A view is being captured; stop it first.")
-        s = self.config.settings
-        if scan_id:
-            scan = self.scans.get(scan_id)
-        else:
-            # Retention (§13): raw frames of old scans are deleted; detections are kept.
-            active = self.maps.active()
-            self.scans.prune_frames({active["scan"]} if active else set(), s.raw_frame_retention_scans)
-            breaks = self.link.cfg.output_breaks() if self.link.cfg else []
-            scan = self.scans.create(s.wled.led_count, {
-                "output_breaks": breaks,
-                "wled": {"mac": self.link.mac, "led_count": s.wled.led_count, "config_hash": self.fingerprint()},
-                "settings": s.capture.model_dump(),
-            })
-        if self.session:
-            asyncio.ensure_future(self.session.stop())
-        sess = CaptureSession(scan, self.output, self.capture_executor, s)
-        sess.boost_brightness, sess.restore_brightness = self.brightness.boost, self.brightness.restore
-        sess.on_status(self.broadcast_status)
-        sess.after_view = self._after_view
-        self.monitor_unsub = self.monitor.subscribe(sess.on_monitor)
-        self.session = sess
-        self.guidance = None
-        return sess
+    def tree(self, tid: str | None = None) -> Tree:
+        """A tree by id (the default tree for None). KeyError if there is none."""
+        return self.default if not tid else self.trees[tid]
 
-    def open_walk(self, scan_id: str | None = None) -> WalkSession:
-        """A walk-around capture (§7.9), in the given scan or a new one."""
-        if self.session and self.session.busy():
-            raise HTTPException(409, "A view is being captured; stop it first.")
-        if self.walk and self.walk.state == "walking":
-            raise HTTPException(409, "A walk is already in progress.")
-        s = self.config.settings
-        if scan_id:
-            scan = self.scans.get(scan_id)
-        else:
-            active = self.maps.active()
-            self.scans.prune_frames({active["scan"]} if active else set(), s.raw_frame_retention_scans)
-            breaks = self.link.cfg.output_breaks() if self.link.cfg else []
-            scan = self.scans.create(s.wled.led_count, {
-                "output_breaks": breaks,
-                "wled": {"mac": self.link.mac, "led_count": s.wled.led_count, "config_hash": self.fingerprint()},
-                "settings": s.capture.model_dump(),
-            })
-        level = 48
-        if self.session and self.session.scan.id == scan.id and getattr(self.session, "cal", None) is not None:
-            lv = [int(v) for v in self.session.cal.levels if v]
-            level = int(np.median(lv)) if lv else level
-        self.walk = WalkSession(scan, self.output, level=level)
-        self.walk.boost_brightness, self.walk.restore_brightness = self.brightness.boost, self.brightness.restore
-        return self.walk
+    def trees_summary(self) -> list[dict]:
+        return [t.summary() for t in self.trees.values()]
 
-    def start_walk_processing(self, scan_id: str, vid: str, video_path: str | None) -> Job:
-        scan = self.scans.get(scan_id)
-        try:
-            view = scan.view(vid)
-        except StopIteration:
-            raise HTTPException(404, "no such view")
-        if view.get("mode") != "walk":
-            raise HTTPException(400, "not a walk-around view")
-        if self.walk and self.walk.scan.id == scan_id and self.walk.vid == vid and self.walk.state == "walking":
-            raise HTTPException(409, "The walk is still in progress.")
-        job = Job("walk", scan_id, self.data_dir / "jobs", vid)
-        self.jobs[job.id] = job
-        s = self.config.settings
-        prev = self.maps.active()
-        wled = {"mac": self.link.mac, "led_count": s.wled.led_count, "config_hash": self.fingerprint()}
-        scan.set_view(vid, status="processing")
+    async def add_tree(self, name: str | None = None) -> Tree:
+        tid = self.config.add_tree(name)
+        t = self.trees[tid] = Tree(self, tid)
+        if self._started:
+            await t.start()
+        return t
 
-        async def run() -> None:
-            try:
-                m = await asyncio.get_running_loop().run_in_executor(
-                    self.executor, process_walk, str(scan.root), vid, s.tree_height_cm, prev, wled, None, video_path,
-                    job.progress_path)
-                job.result = {"map": self.maps.save(m), "quality": m["quality"]}
-                job.status = "done"
-            except Exception as e:  # noqa: BLE001
-                log.exception("walk processing failed")
-                job.status, job.error = "failed", str(e)
-                scan.set_view(vid, status="failed", error=str(e))
-            job.finish()
+    async def remove_tree(self, tid: str) -> None:
+        """Remove a tree from the configuration. Its folder is kept, renamed to
+        trees/.removed/<id>-<time>, so no scan or map is lost."""
+        t = self.trees.get(tid)
+        if t is None:
+            raise KeyError(tid)
+        if tid == self.config.default_tree:
+            raise ValueError("The first tree can't be removed.")
+        if t.busy():
+            raise ValueError(f"{t.name} is being scanned; stop the scan first.")
+        self.config.remove_tree(tid)
+        del self.trees[tid]
+        await t.ha.stop(remove_entities=True)  # its light disappears from Home Assistant
+        await t.stop()
+        src = tree_dir(self.data_dir, tid)
+        if src.exists():
+            dst = self.data_dir / TREES_DIR / ".removed" / f"{tid}-{dt.datetime.now():%Y-%m-%dT%H-%M-%S}"
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(src, dst)
 
-        asyncio.ensure_future(run())
-        return job
+    async def start(self) -> None:
+        self._started = True
+        for t in list(self.trees.values()):
+            await t.start()
 
-    def has_map(self) -> bool:
-        """Is there an active map that fits the LED count (needed by 3D and surface effects)?"""
-        m = self.maps.active()
-        return bool(m and len(m["leds"]) == self.output.led_count and any(l.get("p") for l in m["leds"]))
-
-    def fingerprint(self) -> str | None:
-        return config_fingerprint(self.link.info, self.link.cfg) if self.link.info else None
-
-    def recover(self) -> dict:
-        """After a restart (§7.6): captures that were running when the server stopped.
-
-        - A walk that was in progress is ended where it stopped: its live frames are on
-          disk, and the phone, when it reconnects, is told to upload its recording.
-        - A tripod view that was being captured is reopened in its scan; the next
-          "start view" continues it, keeping everything already captured.
-        Only the most recent scan is reopened."""
-        out: dict = {"walks": [], "view": None}
-        latest = None
-        for p in sorted(self.scans.dir.iterdir(), reverse=True):
-            try:
-                scan = self.scans.get(p.name)
-            except FileNotFoundError:
-                continue
-            for v in scan.meta.get("views", []):
-                if v.get("mode") == "walk" and v.get("status") == "walking":
-                    scan.set_view(v["id"], status="awaiting_upload", stop_reason="server restarted")
-                    scan.events.append({"type": "walk_interrupted", "view": v["id"]})
-                    out["walks"].append((scan.id, v["id"]))
-                elif v.get("status") == "capturing" and latest is None:
-                    latest = (scan, v)
-        if latest is not None:
-            scan, v = latest
-            sess = self.open_session(scan.id)
-            sess.interrupted_view = v["id"]
-            sess._emit(message=f"View {v['id']} was interrupted when the server stopped. Start view continues it.")
-            scan.events.append({"type": "view_interrupted", "view": v["id"]})
-            out["view"] = (scan.id, v["id"])
-        return out
-
-    def map_check(self) -> str | None:
-        """Does the active map still match the controller (§11.4)? A warning, or None.
-        Checked at start-up, whenever the state is read, and before activation."""
-        m = self.maps.active()
-        if not m or not self.link.info:
-            return None
-        w = m.get("wled") or {}
-        mac, n = self.link.info.mac or self.link.mac, self.link.info.led_count
-        if w.get("mac") and mac and w["mac"].lower() != mac.lower():
-            return (f"The active map was made with another WLED controller (MAC {w['mac']}, now {mac}). "
-                    "If the string moved to a new controller with the same wiring, the map still fits; otherwise re-scan.")
-        if n and len(m.get("leds", [])) != n:
-            return (f"The active map has {len(m['leds'])} LEDs but WLED now drives {n}. "
-                    "Check WLED's LED count, or re-scan.")
-        fp = self.fingerprint()
-        if w.get("config_hash") and fp and w["config_hash"] != fp:
-            return ("WLED's LED configuration (outputs, LED count or realtime settings) changed since the active map was made. "
-                    "If LEDs now light in a different order, re-scan; otherwise change it back in WLED.")
-        return None
-
-    def broadcast_status(self, st: dict) -> None:
-        msg = dict(st, guidance=self.guidance)
-        for q in list(self.control_clients):
-            if q.full():
-                try:
-                    q.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-            q.put_nowait(msg)
-
-    async def _after_view(self, vid: str) -> None:
-        """Quick reconstruction for coverage guidance (§7.8)."""
-        sess = self.session
-        if not sess:
-            return
-        done_views = [v for v in sess.scan.meta["views"] if v.get("status") == "done"]
-        if len(done_views) < 2:
-            self.guidance = {"message": "Turn the tree about 45° and start the next view.", "turn_deg": 45.0}
-            self.broadcast_status(sess.status)
-            return
-        try:
-            m = await asyncio.get_running_loop().run_in_executor(
-                self.executor, run_solve, str(sess.scan.root), None, None, None)
-        except Exception as e:  # noqa: BLE001
-            self.guidance = {"message": f"Couldn't build a preview map yet ({e}). Turn the tree about 45° and continue."}
-            self.broadcast_status(sess.status)
-            return
-        last_seg = sess.scan.view(vid)["segments"][-1]
-        self.guidance = guide.guidance(m, last_seg)
-        target = self.guidance.get("target_azimuth")
-        if target is not None:
-            vis = guide.predicted_visible(m, target)
-            sess.predicted_visible = lambda _vid, vis=vis: vis
-        self.broadcast_status(sess.status)
-
-    # ---- jobs --------------------------------------------------------------------------
-    def start_solve(self, scan_id: str) -> Job:
-        scan = self.scans.get(scan_id)
-        job = Job("solve", scan_id, self.data_dir / "jobs")
-        self.jobs[job.id] = job
-        s = self.config.settings
-        prev = self.maps.active()
-        wled = {"mac": self.link.mac, "led_count": s.wled.led_count, "config_hash": self.fingerprint()}
-
-        async def run() -> None:
-            try:
-                f0 = self.profiles.prior_for(scan.meta.get("segments", {}))
-                m = await asyncio.get_running_loop().run_in_executor(
-                    self.executor, run_solve, str(scan.root), s.tree_height_cm, prev, wled, f0, job.progress_path)
-                job.result = {"map": self.maps.save(m), "quality": m["quality"]}
-                job.status = "done"
-            except Exception as e:  # noqa: BLE001
-                log.exception("solve failed")
-                job.status, job.error = "failed", str(e)
-            job.finish()
-
-        asyncio.ensure_future(run())
-        return job
-
-    # ---- test animation --------------------------------------------------------------------
-    def start_effect(self, name: str, brightness: float, index: int | list[int] | None = None,
-                     params: dict | None = None) -> str:
-        """Start an effect on the LEDs; returns the effect actually running (the index chase
-        stands in for effects that need a map when there is none)."""
-        owner = "test"
-        kind = "identify" if name == "identify" else "test"
-        ok, holder = self.output.acquire(owner, kind, ttl=3600)
-        if not ok:
-            raise HTTPException(409, f"LED output is in use ({holder.kind if holder else '?'}).")
-        m = self.maps.active()
-        n = self.output.led_count
-        tree = TreeGeometry.from_map(m) if m and len(m["leds"]) == n else TreeGeometry.chain_only(n)
-        if name == "identify":
-            eff = Identify(index if isinstance(index, list) else int(index or 0))
-        else:
-            if name not in EFFECTS:
-                raise HTTPException(404, f"unknown effect {name}")
-            if EFFECTS[name].needs_map and not tree.has_pos.any():
-                name = "chase"  # no map yet: index chase
-            self._check_params(params)
-            try:
-                eff = EFFECTS[name](params)
-            except ValueError as e:
-                raise HTTPException(422, str(e)) from e
-            if isinstance(eff, DrawingEffect):  # shows the Draw page's picture, live
-                self.drawing.fit()
-                eff.canvas = self.drawing.canvas
-        eff.setup(tree)
-        renderer = make_renderer(eff, brightness)
-        self.output.set_renderer(owner, renderer, fps=40)
-        self.test_owner = owner
-        self.effect_renderer = renderer if name in LIBRARY else None
-        self.lights.sync("app")
-        return name
-
-    @staticmethod
-    def _check_params(params: dict | None) -> None:
-        if params and params.get("palette") is not None and params["palette"] not in PALETTE_IDS:
-            raise HTTPException(422, f"unknown palette {params['palette']}")
-
-    def update_effect(self, params: dict | None, brightness: float | None) -> dict:
-        """Change the running library effect's sliders, palette, colors or brightness without restarting it."""
-        r = self.effect_renderer
-        if r is None or not self.output.holds("test"):
-            raise HTTPException(409, "No effect is running.")
-        self._check_params(params)
-        try:
-            r.effect.set_params(params)
-        except ValueError as e:
-            raise HTTPException(422, str(e)) from e
-        if brightness is not None:
-            r.brightness = float(min(max(brightness, 0.0), 1.0))
-        self.lights.sync("app")
-        return self.effect_state()
-
-    def effect_state(self) -> dict | None:
-        r = self.effect_renderer
-        if r is None or not self.output.holds("test"):
-            return None
-        return {"effect": r.effect.name, "params": r.effect.params.to_dict(), "brightness": r.brightness}
-
-    def stop_effect(self) -> None:
-        self.output.release("test")
-        self.effect_renderer = None
-        self.lights.sync("app")
+    async def stop(self) -> None:
+        for t in list(self.trees.values()):
+            await t.stop()
 
 
+TREE_PREFIX = re.compile(r"^/(api|ws)/trees/([A-Za-z0-9_-]{1,32})(/.+)$")
+
+
+class TreePathPrefix:
+    """`/api/trees/<id>/<route>` is `/api/<route>?tree=<id>` (and the same for `/ws/`)."""
+
+    def __init__(self, app: Any):
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope["type"] in ("http", "websocket"):
+            m = TREE_PREFIX.match(scope["path"])
+            if m:
+                path = f"/{m[1]}{m[3]}"
+                qs = scope.get("query_string", b"")
+                scope = dict(scope, path=path, raw_path=path.encode(),
+                             query_string=(qs + b"&" if qs else b"") + b"tree=" + m[2].encode())
+        await self.app(scope, receive, send)
+
+
+def _tree_id(conn: HTTPConnection) -> str | None:
+    return conn.query_params.get("tree") or conn.headers.get("x-treelights-tree") or None
 def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
     app = FastAPI(title="TreeLights", version=__version__, docs_url="/api/docs", openapi_url="/api/openapi.json")
     app.state.tl = state
+    app.add_middleware(TreePathPrefix)
+
+    def current_tree(conn: HTTPConnection) -> Tree:
+        """The tree a request acts on (see the module docstring)."""
+        tid = _tree_id(conn)
+        try:
+            return state.tree(tid)
+        except KeyError:
+            raise HTTPException(404, f"no tree {tid!r}")
+
+    def ws_tree(ws: WebSocket) -> Tree | None:
+        try:
+            return state.tree(_tree_id(ws))
+        except KeyError:
+            return None
 
     @app.on_event("startup")
     async def _startup() -> None:
-        rec = state.recover()
-        if rec["view"] or rec["walks"]:
-            log.info("recovered after restart: %s", rec)
-        if state.link.host:
-            try:
-                await state.link.refresh(with_cfg=True)
-                state._apply_power()
-                warning = state.map_check()
-                if warning:
-                    log.warning("active map: %s", warning)
-                if state.brightness.boosted:  # the server stopped during a calibration (§5.4)
-                    await state.brightness.restore()
-            except Exception as e:  # noqa: BLE001
-                log.warning("WLED not reachable at start-up: %s", e)
-        state.monitor.start()
-        await state.lights.restore()  # lights that were on before the restart
-        state.lights.start()
-        state.scheduler.start()  # also applies a timer missed while the server was down
-        await state.ha.start()
+        await state.start()
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
-        if state.session:
-            await state.session.stop()
-        if state.walk:
-            await state.walk.stop("server shutdown")
-        if state.brightness.boosted:
-            try:
-                await state.brightness.restore()
-            except Exception as e:  # noqa: BLE001
-                log.warning("couldn't restore WLED brightness; will retry at start-up: %s", e)
-        state.drawing.flush()
-        await state.ha.stop()
-        await state.scheduler.stop()
-        await state.lights.stop()
-        await state.monitor.stop()
-        await state.link.close()
-        state.output.stop()
+        await state.stop()
 
     @app.middleware("http")
     async def pin_check(request: Request, call_next):  # noqa: ANN001
@@ -470,132 +233,238 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
         return r
 
     @app.get("/api/state")
-    def get_state() -> dict:
-        lease = state.output.holder()
-        info = state.link.info
+    def get_state(t: Tree = Depends(current_tree)) -> dict:
+        lease = t.output.holder()
+        info = t.link.info
+        s = t.config.settings
         return {
             "version": __version__,
-            "wled": {"host": state.link.host, "mac": state.link.mac, "version": info.version if info else None,
-                     "led_count": info.led_count if info else None, "monitor_ok": state.monitor.last_ok},
-            "led_count": state.output.led_count,
+            "tree": {"id": t.id, "name": s.tree_name},
+            "trees": [{"id": x.id, "name": x.name} for x in state.trees.values()],
+            "wled": {"host": t.link.host, "mac": t.link.mac, "version": info.version if info else None,
+                     "led_count": info.led_count if info else None, "monitor_ok": t.monitor.last_ok},
+            "controllers": [{"host": l.host, "mac": l.mac, "name": c.name or (l.info.name if l.info else None),
+                             "version": l.info.version if l.info else None,
+                             "led_count": l.info.led_count if l.info else None, "start": sl.start,
+                             "count": sl.count, "monitor_ok": m.last_ok}
+                            for l, c, sl, m in zip(t.links, s.controllers, t.index.slices(), t.monitors)],
+            "led_count": t.output.led_count,
             "lease": None if not lease else {"owner": lease.owner, "kind": lease.kind},
-            "active_map": state.maps.active_id(),
-            "map_warning": state.map_check(),
-            "scan": state.session.scan.id if state.session else None,
-            "session": state.session.status if state.session else None,
-            "rescan": None if not (state.session and state.session.scan.meta.get("rescan")) else
-            {k: len(v) if isinstance(v, list) else v for k, v in state.session.scan.meta["rescan"].items()},
-            "guidance": state.guidance,
-            "tree_height_cm": state.config.settings.tree_height_cm,
-            "lights": {"on": state.effect_state() is not None},
-            "next_timer": state.scheduler.next_event(),
+            "active_map": t.maps.active_id(),
+            "map_warning": t.map_check(),
+            "scan": t.session.scan.id if t.session else None,
+            "session": t.session.status if t.session else None,
+            "rescan": None if not (t.session and t.session.scan.meta.get("rescan")) else
+            {k: len(v) if isinstance(v, list) else v for k, v in t.session.scan.meta["rescan"].items()},
+            "guidance": t.guidance,
+            "tree_height_cm": s.tree_height_cm,
+            "lights": {"on": t.effect_state() is not None},
+            "next_timer": t.scheduler.next_event(),
         }
 
-    @app.get("/api/config")
-    def get_config() -> dict:
-        d = state.config.settings.model_dump()
+    def _config_out(t: Tree) -> dict:
+        d = t.config.settings.model_dump()
         d["pin"] = bool(d["pin"])
         d["mqtt"]["password"] = bool(d["mqtt"]["password"])  # secrets are written, never read back
         return d
 
+    @app.get("/api/config")
+    def get_config(t: Tree = Depends(current_tree)) -> dict:
+        """The tree's settings and the server-wide ones, in the single-tree shape: `wled` is
+        the tree's first controller, `controllers` all of them."""
+        return _config_out(t)
+
+    async def _after_config_change(t: Tree, patch: dict) -> None:
+        if "mqtt" in patch:  # the broker is shared by all trees; the topic is the tree's own
+            for x in list(state.trees.values()):
+                await x.ha.apply()
+        if "schedule" in patch:
+            t.scheduler.poke()
+        if "wled" in patch or "controllers" in patch:
+            s = t.config.settings
+            t.reconfigure()
+            if "wled" in patch and s.wled.host:
+                t.link.set_host(s.wled.host, s.wled.mac, s.wled.http_port)
+            t._apply_sender()
+        if "power" in patch:
+            t._apply_power()
+
+    def _refuse_while_busy(t: Tree, patch: dict) -> None:
+        if ("wled" in patch or "controllers" in patch) and t.busy():
+            raise HTTPException(409, f"{t.name} is being scanned; change its controllers after the scan.")
+
     @app.put("/api/config")
-    async def put_config(patch: dict = Body(...)) -> dict:
+    async def put_config(patch: dict = Body(...), t: Tree = Depends(current_tree)) -> dict:
         if "pin" in patch and patch["pin"] in (True, False):
             patch.pop("pin")
         if isinstance(patch.get("mqtt"), dict) and patch["mqtt"].get("password") in (True, False):
             patch["mqtt"].pop("password")  # the masked value from GET: unchanged
+        _refuse_while_busy(t, patch)
         try:
-            s = state.config.update(patch)
+            t.config.update(patch)
         except ValidationError as e:
             raise HTTPException(422, _validation_message(e))
-        if "mqtt" in patch:
-            await state.ha.apply()
-        if "schedule" in patch:
-            state.scheduler.poke()
-        if "wled" in patch:
-            if s.wled.host:
-                state.link.set_host(s.wled.host, s.wled.mac, s.wled.http_port)
-            state._apply_sender()
-        if "power" in patch:
-            state._apply_power()
-        return get_config()
+        await _after_config_change(t, patch)
+        return _config_out(t)
+
+    # ---- trees (§5.5) ----------------------------------------------------------------------
+    @app.get("/api/trees")
+    def trees_list() -> list[dict]:
+        return state.trees_summary()
+
+    @app.post("/api/trees")
+    async def trees_add(body: dict = Body(default={})) -> dict:
+        try:
+            t = await state.add_tree((body.get("name") or "").strip() or None)
+        except ValidationError as e:
+            raise HTTPException(422, _validation_message(e))
+        return t.summary()
+
+    @app.put("/api/trees/{tid}")
+    def trees_rename(tid: str, body: dict = Body(...)) -> dict:
+        if tid not in state.trees:
+            raise HTTPException(404, f"no tree {tid!r}")
+        try:
+            state.config.rename_tree(tid, str(body.get("name", "")))
+        except ValidationError as e:
+            raise HTTPException(422, _validation_message(e))
+        state.trees[tid].ha.changed()
+        return state.trees[tid].summary()
+
+    @app.delete("/api/trees/{tid}")
+    async def trees_remove(tid: str) -> dict:
+        try:
+            await state.remove_tree(tid)
+        except KeyError:
+            raise HTTPException(404, f"no tree {tid!r}")
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        return {"ok": True}
+
+    # ---- controllers of a tree (§5.5) --------------------------------------------------------
+    @app.get("/api/controllers")
+    def controllers_get(t: Tree = Depends(current_tree)) -> list[dict]:
+        s = t.config.settings
+        return [{**c.model_dump(), "start": sl.start, "last": sl.stop - 1,
+                 "wled": None if not l.info else {"name": l.info.name, "version": l.info.version,
+                                                  "led_count": l.info.led_count, "mac": l.info.mac}}
+                for c, sl, l in zip(s.controllers, t.index.slices(), t.links)]
+
+    @app.put("/api/controllers")
+    async def controllers_put(body: list[dict] = Body(...), t: Tree = Depends(current_tree)) -> list[dict]:
+        """Replace the tree's controllers. Their order is the order of the LED indices:
+        the first controller drives LEDs 0..n1-1, the second the next ones, and so on."""
+        if not isinstance(body, list) or not body:
+            raise HTTPException(400, "A tree needs at least one controller.")
+        patch = {"controllers": [{k: v for k, v in c.items() if k not in ("start", "last", "wled")} for c in body]}
+        _refuse_while_busy(t, patch)
+        try:
+            t.config.update(patch)
+        except ValidationError as e:
+            raise HTTPException(422, _validation_message(e))
+        await _after_config_change(t, patch)
+        return controllers_get(t)
 
     # ---- WLED ----------------------------------------------------------------------------
     @app.get("/api/wled/discover")
     async def wled_discover() -> list[dict]:
         try:
-            return await discovery.discover(timeout=3.0)
+            found = await discovery.discover(timeout=3.0)
         except discovery.DiscoveryError as e:
             raise HTTPException(502, str(e))
         except Exception as e:  # noqa: BLE001 - show the reason, not a bare 500
             log.exception("WLED discovery failed")
             raise HTTPException(500, f"Searching for controllers failed ({type(e).__name__}: {e}). "
                                      "Enter the controller's address instead; the server log has details.")
+        # Which tree already uses each controller (a controller drives one tree only).
+        owners: dict[str, str] = {}
+        for x in state.trees.values():
+            for c in x.config.settings.controllers:
+                for key in (c.host, c.mac):
+                    if key:
+                        owners[key.lower()] = x.id
+        for d in found:
+            d["tree"] = owners.get(str(d.get("mac") or "").lower()) or owners.get(str(d.get("host") or "").lower())
+        return found
 
     @app.post("/api/wled/select")
-    async def wled_select(body: dict = Body(...)) -> dict:
+    async def wled_select(body: dict = Body(...), t: Tree = Depends(current_tree)) -> dict:
+        """Use the controller at `host` for this tree: as its first controller (the default),
+        as controller `controller` (0-based), or as an extra one after the others (`add`)."""
         host = str(body.get("host", "")).strip()
         if not host:
             raise HTTPException(400, "host required")
-        state.link.set_host(host, port=state.config.settings.wled.http_port)
+        s = t.config.settings
+        add = bool(body.get("add"))
+        k = len(s.controllers) if add else int(body.get("controller", 0))
+        if not 0 <= k <= len(s.controllers) or (k == len(s.controllers) and not add):
+            raise HTTPException(400, f"no controller {k + 1} in {s.tree_name}")
+        port = int(body.get("http_port") or (s.controllers[k].http_port if k < len(s.controllers) else 80))
+        from .wled.link import WledLink
+
+        probe = WledLink(host, None, port)
         try:
-            info = await state.link.refresh(with_cfg=True)
+            info = await probe.refresh(with_cfg=False)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(502, f"Can't reach WLED at {host}: {e}")
-        patch: dict = {"wled": {"host": host, "mac": info.mac}}
+        finally:
+            await probe.close()
+        ctl = [c.model_dump() for c in s.controllers]
+        entry = {**(ctl[k] if k < len(ctl) else {}), "host": host, "mac": info.mac, "http_port": port}
         if info.led_count:
-            patch["wled"]["led_count"] = info.led_count
-        state.config.update(patch)
-        state._apply_sender()
-        return {"host": host, "mac": info.mac, "led_count": info.led_count, "version": info.version}
+            entry["led_count"] = info.led_count
+        if k < len(ctl):
+            ctl[k] = entry
+        else:
+            ctl.append(entry)
+        patch = {"controllers": ctl}
+        _refuse_while_busy(t, patch)
+        try:
+            t.config.update(patch)
+        except ValidationError as e:
+            raise HTTPException(409, _validation_message(e))
+        t.reconfigure()
+        link = t.links[k]
+        if link.host != host or link.port != port:
+            link.set_host(host, info.mac, port)
+        try:
+            await link.refresh(with_cfg=True)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"Can't reach WLED at {host}: {e}")
+        t._apply_sender()
+        return {"host": host, "mac": info.mac, "led_count": info.led_count, "version": info.version, "controller": k}
 
     @app.get("/api/wled/checks")
-    async def wled_checks() -> list[dict]:
-        if not state.link.host:
-            return [{"name": "reachable", "status": "fail", "detail": "No controller selected."}]
-        owner = "setup-check"
-
-        async def probe() -> None:
-            ok, _ = state.output.acquire(owner, "identify", ttl=3)
-            if ok:
-                f = np.zeros((state.output.led_count, 3), np.uint8)
-                f[0] = (8, 8, 8)
-                await asyncio.wrap_future(state.output.show(owner, f, repeats=2))
-
-        try:
-            checks = await state.link.setup_checks(state.config.settings.wled.led_count, probe)
-        finally:
-            state.output.release(owner)
-        state._apply_power()
-        return [c.__dict__ for c in checks]
+    async def wled_checks(t: Tree = Depends(current_tree)) -> list[dict]:
+        return await t.setup_checks()
 
     @app.post("/api/wled/identify")
-    def wled_identify(body: dict = Body(...)) -> dict:
-        state.start_effect("identify", float(body.get("brightness", 0.6)), int(body.get("index", 0)))
+    def wled_identify(body: dict = Body(...), t: Tree = Depends(current_tree)) -> dict:
+        t.start_effect("identify", float(body.get("brightness", 0.6)), int(body.get("index", 0)))
         return {"ok": True}
 
     # ---- scans ---------------------------------------------------------------------------
     @app.get("/api/scans")
-    def scans() -> list[dict]:
-        return state.scans.list()
+    def scans(t: Tree = Depends(current_tree)) -> list[dict]:
+        return t.scans.list()
 
     @app.post("/api/scans")
-    async def new_scan() -> dict:
-        sess = state.open_session()
+    async def new_scan(t: Tree = Depends(current_tree)) -> dict:
+        sess = t.open_session()
         return {"scan": sess.scan.id}
 
     @app.post("/api/scans/{sid}/open")
-    async def open_scan(sid: str) -> dict:
+    async def open_scan(sid: str, t: Tree = Depends(current_tree)) -> dict:
         try:
-            sess = state.open_session(sid)
+            sess = t.open_session(sid)
         except FileNotFoundError:
             raise HTTPException(404, "no such scan")
         return {"scan": sess.scan.id}
 
     @app.get("/api/scans/{sid}")
-    def scan_detail(sid: str) -> dict:
+    def scan_detail(sid: str, t: Tree = Depends(current_tree)) -> dict:
         try:
-            scan = state.scans.get(sid)
+            scan = t.scans.get(sid)
         except FileNotFoundError:
             raise HTTPException(404, "no such scan")
         obs = scan.observations()
@@ -603,11 +472,11 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
         return {"meta": scan.meta, "seen_leds": len(seen), "overrides": scan.overrides()}
 
     @app.get("/api/scans/{sid}/overrides")
-    def get_overrides(sid: str) -> dict:
-        return state.scans.get(sid).overrides()
+    def get_overrides(sid: str, t: Tree = Depends(current_tree)) -> dict:
+        return t.scans.get(sid).overrides()
 
     @app.put("/api/scans/{sid}/overrides")
-    def put_overrides(sid: str, body: dict = Body(...)) -> dict:
+    def put_overrides(sid: str, body: dict = Body(...), t: Tree = Depends(current_tree)) -> dict:
         allowed = {"bad", "positions", "breaks", "links", "cap", "locked"}
         clean = {k: v for k, v in body.items() if k in allowed}
         # Link bounds and the cap are lengths in map units (cm, or tree heights): positive numbers.
@@ -622,20 +491,20 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
                     raise ValueError("the cap must be a positive length")
         except (TypeError, ValueError) as e:
             raise HTTPException(400, f"Invalid link limits: {e}")
-        state.scans.get(sid).set_overrides(clean)
+        t.scans.get(sid).set_overrides(clean)
         return clean
 
     @app.post("/api/scans/{sid}/solve")
-    async def solve_scan(sid: str) -> dict:
+    async def solve_scan(sid: str, t: Tree = Depends(current_tree)) -> dict:
         try:
-            return state.start_solve(sid).to_dict()
+            return t.start_solve(sid).to_dict()
         except FileNotFoundError:
             raise HTTPException(404, "no such scan")
 
     @app.get("/api/jobs")
-    def jobs_running() -> list[dict]:
+    def jobs_running(t: Tree = Depends(current_tree)) -> list[dict]:
         """Jobs still running (decoding or solving), so a reloaded page can show their progress."""
-        return [j.to_dict() for j in state.jobs.values() if j.status == "running"]
+        return [j.to_dict() for j in state.jobs.values() if j.status == "running" and j.tree in (None, t.id)]
 
     @app.get("/api/jobs/{jid}")
     def job(jid: str) -> dict:
@@ -681,37 +550,37 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
     MAX_VIDEO = 2 * 2**30
 
     @app.post("/api/scans/{sid}/video/play")
-    async def video_play(sid: str, body: dict = Body(default={})) -> dict:
+    async def video_play(sid: str, body: dict = Body(default={}), t: Tree = Depends(current_tree)) -> dict:
         try:
-            scan = state.scans.get(sid)
+            scan = t.scans.get(sid)
         except FileNotFoundError:
             raise HTTPException(404, "no such scan")
-        if state.session and state.session.busy():
+        if t.session and t.session.busy():
             raise HTTPException(409, "A live view is being captured.")
         n = scan.meta["led_count"]
         levels = None
-        if state.session and state.session.scan.id == sid:
-            levels = [int(v) for v in state.session.cal.levels]
+        if t.session and t.session.scan.id == sid:
+            levels = [int(v) for v in t.session.cal.levels]
         seed = int(time.time()) % 100000
         tl = videomode.Timeline.build(n, seed, levels)
         countdown = float(body.get("countdown_s", 10))
         vid = scan.add_view({"mode": "video", "status": "recording", "timeline": tl.to_json()})
         owner = "video-sequence"
-        ok, holder = state.output.acquire(owner, "calibration", ttl=countdown + tl.duration + 30)
+        ok, holder = t.output.acquire(owner, "calibration", ttl=countdown + tl.duration + 30)
         if not ok:
             raise HTTPException(409, f"LED output is in use ({holder.kind if holder else '?'}).")
-        state.output.set_renderer(owner, videomode.player(tl, countdown), fps=40)
+        t.output.set_renderer(owner, videomode.player(tl, countdown), fps=40)
 
         async def finish() -> None:
             await asyncio.sleep(countdown + tl.duration + 1.5)
-            state.output.release(owner)
+            t.output.release(owner)
             scan.set_view(vid, status="awaiting_upload")
 
         asyncio.ensure_future(finish())
         return {"view": vid, "countdown_s": countdown, "duration_s": round(tl.duration, 1)}
 
-    def _video_path(sid: str, vid: str) -> Path:
-        scan = state.scans.get(sid)
+    def _video_path(sid: str, vid: str, t: Tree) -> Path:
+        scan = t.scans.get(sid)
         if not any(v["id"] == vid for v in scan.meta["views"]):
             raise HTTPException(404, "no such view")
         p = scan.root / "videos" / f"{vid}.upload"
@@ -719,14 +588,14 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
         return p
 
     @app.get("/api/scans/{sid}/video/{vid}/upload")
-    def video_upload_size(sid: str, vid: str) -> dict:
-        p = _video_path(sid, vid)
+    def video_upload_size(sid: str, vid: str, t: Tree = Depends(current_tree)) -> dict:
+        p = _video_path(sid, vid, t)
         return {"size": p.stat().st_size if p.exists() else 0}
 
     @app.put("/api/scans/{sid}/video/{vid}/upload")
-    async def video_upload_chunk(sid: str, vid: str, request: Request, offset: int = 0) -> dict:
+    async def video_upload_chunk(sid: str, vid: str, request: Request, offset: int = 0, t: Tree = Depends(current_tree)) -> dict:
         """Resumable upload: chunks are appended at `offset`, which must equal the current size."""
-        p = _video_path(sid, vid)
+        p = _video_path(sid, vid, t)
         size = p.stat().st_size if p.exists() else 0
         if offset != size:
             raise HTTPException(409, f"offset {offset} != size {size}")
@@ -739,13 +608,13 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
         return {"size": size}
 
     @app.post("/api/scans/{sid}/video/{vid}/decode")
-    async def video_decode(sid: str, vid: str) -> dict:
-        p = _video_path(sid, vid)
+    async def video_decode(sid: str, vid: str, t: Tree = Depends(current_tree)) -> dict:
+        p = _video_path(sid, vid, t)
         if not p.exists() or p.stat().st_size == 0:
             raise HTTPException(400, "upload the video first")
-        scan = state.scans.get(sid)
+        scan = t.scans.get(sid)
         tl_meta = scan.view(vid).get("timeline")
-        job = Job("video", sid)
+        job = Job("video", sid, tree=t.id)
         state.jobs[job.id] = job
 
         async def run() -> None:
@@ -766,21 +635,21 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
         return "walk" if modes and all(m == "walk" for m in modes) else "tripod"
 
     @app.get("/api/maps/{mid}/rescan")
-    def rescan_info(mid: str) -> dict:
-        m = get_map(mid)
+    def rescan_info(mid: str, t: Tree = Depends(current_tree)) -> dict:
+        m = get_map(mid, t)
         low = rescan.low_confidence(m)
         try:
-            kind = _scan_kind(state.scans.get(m["scan"]))
+            kind = _scan_kind(t.scans.get(m["scan"]))
         except FileNotFoundError:
             kind = None
         return {"map": mid, "scan": m["scan"], "kind": kind, "low_confidence": low, "n": len(m["leds"])}
 
     @app.post("/api/maps/{mid}/rescan")
-    async def rescan_setup(mid: str, body: dict = Body(default={})) -> dict:
+    async def rescan_setup(mid: str, body: dict = Body(default={}), t: Tree = Depends(current_tree)) -> dict:
         """Choose LEDs to re-scan; sets up the capture in the map's scan. Tripod scans
         get a pending re-scan view (started from Control or Calibrate); walk scans are
         re-scanned by walking again into the same scan (the Scan page with ?scan=)."""
-        m = get_map(mid)
+        m = get_map(mid, t)
         n = len(m["leds"])
         try:
             if body.get("low_confidence"):
@@ -794,40 +663,40 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
         if not leds:
             raise HTTPException(400, "No LEDs selected.")
         try:
-            scan = state.scans.get(m["scan"])
+            scan = t.scans.get(m["scan"])
         except FileNotFoundError:
             raise HTTPException(404, "The scan this map was built from no longer exists.")
         kind = _scan_kind(scan)
         out = {"map": mid, "scan": scan.id, "kind": kind, "leds": leds}
         if kind == "tripod":
             anc = rescan.anchors(m, exclude=set(leds))
-            sess = state.session if state.session and state.session.scan.id == scan.id else state.open_session(scan.id)
+            sess = t.session if t.session and t.session.scan.id == scan.id else t.open_session(scan.id)
             sess.scan.meta["rescan"] = {"map": mid, "leds": leds, "anchors": anc, "capture": sorted(set(leds) | set(anc))}
             sess.scan.save()
             out["anchors"] = anc
         return out
 
     @app.post("/api/leds/show")
-    def leds_show(body: dict = Body(default={})) -> dict:
+    def leds_show(body: dict = Body(default={}), t: Tree = Depends(current_tree)) -> dict:
         """Blink a set of LEDs on the tree (e.g. the ones about to be re-scanned)."""
-        n = state.output.led_count
+        n = t.output.led_count
         leds = sorted({int(i) for i in body.get("leds", []) if 0 <= int(i) < n})
         if not leds:
             raise HTTPException(400, "No LEDs given.")
-        state.start_effect("identify", float(body.get("brightness", 0.6)), leds)
+        t.start_effect("identify", float(body.get("brightness", 0.6)), leds)
         return {"ok": True, "count": len(leds)}
 
     # ---- walk-around capture (§7.9) -----------------------------------------------------------
     @app.get("/api/walks")
-    def walks() -> list[dict]:
+    def walks(t: Tree = Depends(current_tree)) -> list[dict]:
         """Every walk recorded, newest first, with what's still on disk: the raw recording and
         live frames (needed to decode again; old scans' raw data is pruned, §13) and the
         decoded keyframes (kept; enough to solve again)."""
         out = []
-        active = state.maps.active()
-        for p in sorted(state.scans.dir.iterdir(), reverse=True):
+        active = t.maps.active()
+        for p in sorted(t.scans.dir.iterdir(), reverse=True):
             try:
-                scan = state.scans.get(p.name)
+                scan = t.scans.get(p.name)
             except FileNotFoundError:
                 continue
             for v in scan.meta.get("views", []):
@@ -845,60 +714,60 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
                     "keyframes": len(obs.get("segments", {})),
                     "decoded": (obs.get("info") or {}).get("decoded"),
                     "active_map_scan": bool(active and active.get("scan") == scan.id),
-                    "busy": bool(state.walk and state.walk.scan.id == scan.id and state.walk.vid == v["id"] and state.walk.state == "walking"),
+                    "busy": bool(t.walk and t.walk.scan.id == scan.id and t.walk.vid == v["id"] and t.walk.state == "walking"),
                 })
         return out
 
     @app.post("/api/scans/{sid}/walk/{vid}/process")
-    async def walk_process(sid: str, vid: str, body: dict = Body(default={})) -> dict:
+    async def walk_process(sid: str, vid: str, body: dict = Body(default={}), t: Tree = Depends(current_tree)) -> dict:
         """Decode the walk's live frames and uploaded recording (if any), then solve."""
         try:
-            p = _video_path(sid, vid)
+            p = _video_path(sid, vid, t)
         except FileNotFoundError:
             raise HTTPException(404, "no such scan")
         use_video = body.get("video", True) and p.exists() and p.stat().st_size > 0
-        live = state.scans.get(sid).root / "walk" / vid / "live"
+        live = t.scans.get(sid).root / "walk" / vid / "live"
         if not use_video and not (live.is_dir() and any(live.glob("*.jpg"))):
             raise HTTPException(409, "This walk's recording and live frames are no longer stored (old scans' raw data is "
                                      "deleted to save space), so it can't be decoded again. Solve the scan again instead: "
                                      "that uses the keyframes decoded before.")
-        return state.start_walk_processing(sid, vid, str(p) if use_video else None).to_dict()
+        return t.start_walk_processing(sid, vid, str(p) if use_video else None).to_dict()
 
     # ---- maps -----------------------------------------------------------------------------
     @app.get("/api/maps")
-    def maps() -> list[dict]:
-        return state.maps.list()
+    def maps(t: Tree = Depends(current_tree)) -> list[dict]:
+        return t.maps.list()
 
     @app.get("/api/maps/active")
-    def active_map() -> dict:
-        m = state.maps.active()
+    def active_map(t: Tree = Depends(current_tree)) -> dict:
+        m = t.maps.active()
         if not m:
             raise HTTPException(404, "no active map")
         return m
 
     @app.get("/api/maps/{mid}")
-    def get_map(mid: str) -> dict:
+    def get_map(mid: str, t: Tree = Depends(current_tree)) -> dict:
         try:
-            return state.maps.get(mid)
+            return t.maps.get(mid)
         except FileNotFoundError:
             raise HTTPException(404, "no such map")
 
     @app.post("/api/maps/{mid}/activate")
-    def activate(mid: str, body: dict = Body(default={})) -> dict:
+    def activate(mid: str, body: dict = Body(default={}), t: Tree = Depends(current_tree)) -> dict:
         try:
-            return state.maps.activate(mid, state.fingerprint(), force=bool(body.get("force")))
+            return t.maps.activate(mid, t.fingerprint(), force=bool(body.get("force")))
         except ActivationBlocked as e:
             raise HTTPException(409, str(e))
         except FileNotFoundError:
             raise HTTPException(404, "no such map")
 
     @app.post("/api/maps/rollback")
-    def rollback() -> dict:
-        return {"active": state.maps.rollback()}
+    def rollback(t: Tree = Depends(current_tree)) -> dict:
+        return {"active": t.maps.rollback()}
 
     @app.get("/api/maps/{mid}/export")
-    def export(mid: str, fmt: str = "json") -> Response:
-        m = get_map(mid)
+    def export(mid: str, fmt: str = "json", t: Tree = Depends(current_tree)) -> Response:
+        m = get_map(mid, t)
         if fmt == "csv":
             return PlainTextResponse(export_csv(m), media_type="text/csv",
                                      headers={"Content-Disposition": f'attachment; filename="treelights-{mid}.csv"'})
@@ -906,72 +775,72 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
 
     # ---- test animation ------------------------------------------------------------------
     @app.post("/api/test/start")
-    def test_start(body: dict = Body(default={})) -> dict:
-        running = state.start_effect(body.get("effect", "sweep"), float(body.get("brightness", 0.5)),
+    def test_start(body: dict = Body(default={}), t: Tree = Depends(current_tree)) -> dict:
+        running = t.start_effect(body.get("effect", "sweep"), float(body.get("brightness", 0.5)),
                                      params=body.get("params"))
         return {"ok": True, "effect": running}
 
     # ---- effects library -----------------------------------------------------------------
     @app.get("/api/effects")
-    def effects_list() -> dict:
-        return {"effects": library(), "palettes": catalogue(), "current": state.effect_state()}
+    def effects_list(t: Tree = Depends(current_tree)) -> dict:
+        return {"effects": library(), "palettes": catalogue(), "current": t.effect_state()}
 
     @app.post("/api/effects/params")
-    def effects_params(body: dict = Body(default={})) -> dict:
+    def effects_params(body: dict = Body(default={}), t: Tree = Depends(current_tree)) -> dict:
         b = body.get("brightness")
-        return {"ok": True, "current": state.update_effect(body.get("params"), None if b is None else float(b))}
+        return {"ok": True, "current": t.update_effect(body.get("params"), None if b is None else float(b))}
 
     @app.post("/api/test/stop")
-    def test_stop() -> dict:
-        state.stop_effect()
+    def test_stop(t: Tree = Depends(current_tree)) -> dict:
+        t.stop_effect()
         return {"ok": True}
 
     # ---- lights on/off, timers, Home Assistant ------------------------------------------------
     @app.get("/api/lights")
-    def lights_get() -> dict:
-        return state.lights.status()
+    def lights_get(t: Tree = Depends(current_tree)) -> dict:
+        return t.lights.status()
 
     @app.post("/api/lights")
-    async def lights_set(body: dict = Body(default={})) -> dict:
+    async def lights_set(body: dict = Body(default={}), t: Tree = Depends(current_tree)) -> dict:
         """`{"on": true, "effect"?, "params"?, "brightness"?}` or `{"on": false}`. Without "on",
         changes the parameters (kept for the next "on" while off)."""
         b = body.get("brightness")
         try:
             if body.get("on") is False:
-                return await state.lights.turn_off(source="app")
+                return await t.lights.turn_off(source="app")
             if body.get("on") is True:
-                return await state.lights.turn_on(body.get("effect"), body.get("params"),
+                return await t.lights.turn_on(body.get("effect"), body.get("params"),
                                                   None if b is None else float(b), source="app")
-            return await state.lights.set_params(body.get("params"), None if b is None else float(b), source="app")
+            return await t.lights.set_params(body.get("params"), None if b is None else float(b), source="app")
         except LightsBusy as e:
             raise HTTPException(409, str(e))
         except (ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
     @app.get("/api/schedule")
-    def schedule_get() -> dict:
-        return state.scheduler.status()
+    def schedule_get(t: Tree = Depends(current_tree)) -> dict:
+        return t.scheduler.status()
 
     @app.put("/api/schedule")
-    def schedule_put(body: dict = Body(...)) -> dict:
+    def schedule_put(body: dict = Body(...), t: Tree = Depends(current_tree)) -> dict:
         """The schedule settings (timers replace the list as a whole); returns the new status."""
         try:
-            state.config.update({"schedule": body})
+            t.config.update({"schedule": body})
         except ValidationError as e:
             raise HTTPException(422, _validation_message(e))
-        state.scheduler.poke()
-        return state.scheduler.status()
+        t.scheduler.poke()
+        return t.scheduler.status()
 
     @app.get("/api/homeassistant")
-    def homeassistant_status() -> dict:
-        return state.ha.status()
+    def homeassistant_status(t: Tree = Depends(current_tree)) -> dict:
+        return t.ha.status()
 
     # ---- drawing from the phone (the Draw page) ------------------------------------------------
-    async def draw_command(cmd: dict) -> dict:
+    async def draw_command(t: Tree, cmd: dict) -> dict:
         """One Draw page command, from the REST API or /ws/draw. After a change the picture is
         shown on the tree unless `show` is false, it's shown already, or a capture holds the LEDs.
         Raises ValueError (bad input, no map), KeyError (no such drawing) or LightsBusy."""
-        d = state.drawing
+        d = t.drawing
         t = cmd.get("type")
         changed = None
         if t == "stroke":
@@ -1001,50 +870,54 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
         return HTTPException(422, str(e))
 
     @app.get("/api/drawing")
-    def drawing_get() -> dict:
+    def drawing_get(t: Tree = Depends(current_tree)) -> dict:
         """The picture (one color per LED) and whether it's on the tree."""
-        return state.drawing.state()
+        return t.drawing.state()
 
     @app.post("/api/drawing/{action}")
-    async def drawing_action(action: str, body: dict = Body(default={})) -> dict:
+    async def drawing_action(action: str, body: dict = Body(default={}), t: Tree = Depends(current_tree)) -> dict:
         """`stroke {points, space: "3d"|"uv", radius, color, erase?, start?, show?}`, `fill {color}`,
         `clear`, `undo`, `show`."""
         if action not in ("stroke", "fill", "clear", "undo", "show"):
             raise HTTPException(404, f"unknown drawing action {action}")
         try:
-            return await draw_command({**body, "type": action})
+            return await draw_command(t, {**body, "type": action})
         except (ValueError, TypeError, KeyError, LightsBusy) as e:
             raise drawing_http_error(e)
 
     @app.get("/api/drawings")
-    def drawings_list() -> list[dict]:
-        return state.drawing.saved()
+    def drawings_list(t: Tree = Depends(current_tree)) -> list[dict]:
+        return t.drawing.saved()
 
     @app.post("/api/drawings")
-    def drawings_save(body: dict = Body(default={})) -> dict:
+    def drawings_save(body: dict = Body(default={}), t: Tree = Depends(current_tree)) -> dict:
         """Save the picture as a still scene: `{name?}`."""
-        return {"ok": True, **state.drawing.save(body.get("name")), "drawings": state.drawing.saved()}
+        return {"ok": True, **t.drawing.save(body.get("name")), "drawings": t.drawing.saved()}
 
     @app.post("/api/drawings/{did}/load")
-    async def drawings_load(did: str, body: dict = Body(default={})) -> dict:
+    async def drawings_load(did: str, body: dict = Body(default={}), t: Tree = Depends(current_tree)) -> dict:
         try:
-            return await draw_command({"type": "load", "id": did, "show": body.get("show", True)})
+            return await draw_command(t, {"type": "load", "id": did, "show": body.get("show", True)})
         except (ValueError, TypeError, KeyError, LightsBusy) as e:
             raise drawing_http_error(e)
 
     @app.delete("/api/drawings/{did}")
-    def drawings_delete(did: str) -> dict:
+    def drawings_delete(did: str, t: Tree = Depends(current_tree)) -> dict:
         try:
-            state.drawing.delete(did)
+            t.drawing.delete(did)
         except KeyError as e:
             raise drawing_http_error(e)
-        return {"ok": True, "drawings": state.drawing.saved()}
+        return {"ok": True, "drawings": t.drawing.saved()}
 
     # ---- WebSockets ----------------------------------------------------------------------
     @app.websocket("/ws/capture")
     async def ws_capture(ws: WebSocket) -> None:
         if not ws_allowed(ws):
             await ws.close(code=4401)
+            return
+        tr = ws_tree(ws)
+        if tr is None:
+            await ws.close(code=4404)
             return
         await ws.accept()
         lock = asyncio.Lock()
@@ -1057,9 +930,9 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
             hello = await ws.receive_json()
         except (WebSocketDisconnect, ValueError):
             return
-        sess = state.session or state.open_session()
+        sess = tr.session or tr.open_session()
         await sess.camera_connected(send, hello)
-        unsub = sess.on_status(lambda st: asyncio.ensure_future(_safe(send, dict(st, guidance=state.guidance))))
+        unsub = sess.on_status(lambda st: asyncio.ensure_future(_safe(send, dict(st, guidance=tr.guidance))))
         try:
             while True:
                 msg = await ws.receive()
@@ -1079,7 +952,7 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
             pass
         finally:
             unsub()
-            if state.session is sess:
+            if tr.session is sess:
                 sess.camera_disconnected("websocket closed")
 
     @app.websocket("/ws/walk")
@@ -1087,6 +960,10 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
         """The phone during a walk-around capture (protocol: walk/protocol.py)."""
         if not ws_allowed(ws):
             await ws.close(code=4401)
+            return
+        tr = ws_tree(ws)
+        if tr is None:
+            await ws.close(code=4404)
             return
         await ws.accept()
         lock = asyncio.Lock()
@@ -1099,18 +976,18 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
             hello = await ws.receive_json()
         except (WebSocketDisconnect, ValueError):
             return
-        walk = state.walk
+        walk = tr.walk
         resume = walk is not None and walk.state == "walking" and hello.get("view") == walk.vid
         if not resume and hello.get("view") and hello.get("scan"):
             # The phone was walking when the server stopped: that walk has ended; tell the
             # phone to upload its recording and process what was captured.
             try:
-                old = state.scans.get(hello["scan"]).view(hello["view"])
+                old = tr.scans.get(hello["scan"]).view(hello["view"])
             except (FileNotFoundError, StopIteration):
                 old = None
             if old and old.get("mode") == "walk" and old.get("status") == "awaiting_upload":
                 sid, vid = hello["scan"], hello["view"]
-                await send({"type": "welcome", "scan": sid, "view": vid, "n": state.output.led_count,
+                await send({"type": "welcome", "scan": sid, "view": vid, "n": tr.output.led_count,
                             **walkproto.timing_info(), "resumed": False})
                 await send({"type": "stopped", "scan": sid, "view": vid, "reason": old.get("stop_reason", "ended"),
                             "upload": f"/api/scans/{sid}/video/{vid}/upload", "process": f"/api/scans/{sid}/walk/{vid}/process"})
@@ -1118,7 +995,7 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
                 return
         try:
             if not resume:
-                walk = state.open_walk(hello.get("scan"))
+                walk = tr.open_walk(hello.get("scan"))
         except (HTTPException, FileNotFoundError) as e:
             await send({"type": "error", "message": getattr(e, "detail", None) or "no such scan"})
             await ws.close()
@@ -1185,11 +1062,15 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
         if not ws_allowed(ws):
             await ws.close(code=4401)
             return
+        tr = ws_tree(ws)
+        if tr is None:
+            await ws.close(code=4404)
+            return
         await ws.accept()
         q: asyncio.Queue = asyncio.Queue(maxsize=20)
-        state.control_clients.add(q)
-        if state.session:
-            q.put_nowait(dict(state.session.status, guidance=state.guidance))
+        tr.control_clients.add(q)
+        if tr.session:
+            q.put_nowait(dict(tr.session.status, guidance=tr.guidance))
 
         async def pump() -> None:
             while True:
@@ -1202,7 +1083,7 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
                 t = cmd.get("type")
                 try:
                     if t == "start_view":
-                        sess = state.session or state.open_session()
+                        sess = tr.session or tr.open_session()
                         delay = float(cmd.get("delay_s", 0))
                         if delay:
                             await asyncio.sleep(min(delay, 10))
@@ -1220,26 +1101,30 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
                             sess.start_view(view.get("mode", mode), view_id=resume, leds=view.get("leds"))
                         else:
                             sess.start_view(mode, leds=leds)
-                    elif t == "stop" and state.session:
-                        await state.session.stop()
-                    elif t == "resume" and state.session:
-                        state.session.resume()
+                    elif t == "stop" and tr.session:
+                        await tr.session.stop()
+                    elif t == "resume" and tr.session:
+                        tr.session.resume()
                     elif t == "new_scan":
-                        state.open_session()
-                        await ws.send_json({"type": "scan", "scan": state.session.scan.id})
+                        tr.open_session()
+                        await ws.send_json({"type": "scan", "scan": tr.session.scan.id})
                 except (RuntimeError, HTTPException) as e:
                     await ws.send_json({"type": "error", "message": getattr(e, "detail", None) or str(e)})
         except (WebSocketDisconnect, ValueError):
             pass
         finally:
             pt.cancel()
-            state.control_clients.discard(q)
+            tr.control_clients.discard(q)
 
     @app.websocket("/ws/draw")
     async def ws_draw(ws: WebSocket) -> None:
         """The Draw page: commands in (as `draw_command`), the picture's changes and status out."""
         if not ws_allowed(ws):
             await ws.close(code=4401)
+            return
+        tr = ws_tree(ws)
+        if tr is None:
+            await ws.close(code=4404)
             return
         await ws.accept()
         loop = asyncio.get_running_loop()
@@ -1250,18 +1135,18 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
             if q.full():  # a slow client: drop the backlog and send the whole picture
                 while not q.empty():
                     q.get_nowait()
-                msg = state.drawing.canvas_msg()
+                msg = tr.drawing.canvas_msg()
             q.put_nowait(msg)
 
         def push_status() -> None:  # event loop
-            st = state.drawing.status()
+            st = tr.drawing.status()
             if st != last[0]:
                 last[0] = st
                 push({"type": "status", **st})
 
-        unsub = state.drawing.subscribe(push)
-        unsub_lights = state.lights.subscribe(lambda: loop.call_soon_threadsafe(push_status))
-        first = state.drawing.state()
+        unsub = tr.drawing.subscribe(push)
+        unsub_lights = tr.lights.subscribe(lambda: loop.call_soon_threadsafe(push_status))
+        first = tr.drawing.state()
         last[0] = {k: v for k, v in first.items() if k != "colors"}
         push({"type": "state", **first})
 
@@ -1277,7 +1162,7 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
                     cmd = json.loads(text)
                     if not isinstance(cmd, dict):
                         raise ValueError("expected a JSON object")
-                    await draw_command(cmd)
+                    await draw_command(tr, cmd)
                 except (ValueError, TypeError, KeyError, LightsBusy) as e:
                     push({"type": "error", "message": drawing_http_error(e).detail})
                 push_status()
@@ -1292,6 +1177,10 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
     async def ws_preview(ws: WebSocket) -> None:
         if not ws_allowed(ws):
             await ws.close(code=4401)
+            return
+        tr = ws_tree(ws)
+        if tr is None:
+            await ws.close(code=4404)
             return
         await ws.accept()
         loop = asyncio.get_running_loop()
@@ -1311,15 +1200,15 @@ def create_app(state: AppState, web_dir: Path | None = None) -> FastAPI:
 
             loop.call_soon_threadsafe(put)
 
-        state.output.add_listener(on_frame)
+        tr.output.add_listener(on_frame)
         try:
             while True:
                 await ws.send_bytes(await q.get())
         except (WebSocketDisconnect, RuntimeError):
             pass
         finally:
-            if on_frame in state.output._listeners:
-                state.output._listeners.remove(on_frame)
+            if on_frame in tr.output._listeners:
+                tr.output._listeners.remove(on_frame)
 
     # ---- static web app ------------------------------------------------------------------
     if web_dir and Path(web_dir).is_dir():

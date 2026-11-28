@@ -1,4 +1,4 @@
-import { api, fmtErr, h, type Page } from "../api";
+import { api, fmtErr, h, withTree, type Page } from "../api";
 import { STATUS_COLORS, TreeViewer, type TreeMap } from "../viewer";
 
 export function mapPage(): Page {
@@ -457,8 +457,8 @@ export function mapPage(): Page {
           h("div", { class: "row", style: { marginTop: "10px" } },
             h("button", { class: "primary", onclick: () => activate() }, "Activate"),
             h("button", { onclick: rollback }, "Roll back"),
-            h("button", { onclick: () => map && window.open(`/api/maps/${map.id}/export?fmt=json`) }, "Export JSON"),
-            h("button", { onclick: () => map && window.open(`/api/maps/${map.id}/export?fmt=csv`) }, "Export CSV"),
+            h("button", { onclick: () => map && window.open(withTree(`/api/maps/${map.id}/export?fmt=json`)) }, "Export JSON"),
+            h("button", { onclick: () => map && window.open(withTree(`/api/maps/${map.id}/export?fmt=csv`)) }, "Export CSV"),
           ),
         ),
         viewerBox,

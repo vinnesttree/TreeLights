@@ -326,3 +326,31 @@ def test_draw_websocket_streams_the_picture_to_every_page(tmp_path):
                 assert cv["colors"][10] == "#000000" and cv["undo"] == 0
     finally:
         state.output.stop()
+
+
+async def test_each_tree_has_its_own_drawing(tmp_path):
+    state = AppState(tmp_path / "data", executor=concurrent.futures.ThreadPoolExecutor(1))
+    app = create_app(state)
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as http:
+            tid = (await http.post("/api/trees", json={"name": "Second"})).json()["id"]
+            t1, t2 = state.trees["tree1"], state.trees[tid]
+            assert t1.drawing is not t2.drawing and t1.drawing.path != t2.drawing.path
+            for t in (t1, t2):
+                m = _cone_map(t.output.led_count)
+                t.maps.activate(t.maps.save(m), None, force=True)
+            b = BrushSpace(TreeGeometry.from_map(_cone_map(t2.output.led_count)))
+            uv10 = [float(b.u[10]), float(b.v[10])]
+            r = await http.post(f"/api/trees/{tid}/drawing/stroke",
+                                json={"space": "uv", "points": [uv10], "radius": 0.02, "color": "#00ff00", "show": False})
+            assert r.status_code == 200, r.text
+            assert (await http.get("/api/drawing", params={"tree": tid})).json()["colors"][10] == "#00ff00"
+            assert (await http.get("/api/drawing")).json()["colors"][10] == "#000000"  # tree 1 untouched
+            s = (await http.post(f"/api/trees/{tid}/drawings", json={"name": "Dot"})).json()
+            assert [x["id"] for x in s["drawings"]] == [s["id"]]
+            assert (await http.get("/api/drawings")).json() == []
+            t2.drawing.flush()
+            assert t2.drawing.path.is_relative_to(t2.data_dir) and t2.drawing.path.exists()
+    finally:
+        await state.stop()

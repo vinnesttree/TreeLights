@@ -127,7 +127,10 @@ def test_recovery_after_restart(tmp_path):
             assert state.session is not None and state.session.scan.id == tripod.id
             assert state.session.interrupted_view == v_cut
             assert "interrupted" in c.get("/api/state").json()["session"]["message"]
-            assert store.get(walk.id).view(w)["status"] == "awaiting_upload"
+            # The scans were written where a single-tree install kept them; start-up moved
+            # them into the default tree's folder (config.migrate) before recovering.
+            assert not store.dir.exists()
+            assert state.scans.get(walk.id).view(w)["status"] == "awaiting_upload"
             with c.websocket_connect("/ws/walk") as ws:
                 ws.send_json({"type": "hello", "role": "walk", "scan": walk.id, "view": w})
                 assert ws.receive_json()["type"] == "welcome"

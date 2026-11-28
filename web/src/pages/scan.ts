@@ -4,7 +4,7 @@
 // same time, and uploads the recording when the walk ends. The server decodes
 // both and builds the map.
 
-import { api, fmtErr, h, LiveSocket, type Page } from "../api";
+import { api, fmtErr, h, LiveSocket, withTree, type Page } from "../api";
 import { CameraCapture, WakeLock } from "../camera";
 import { Orientation, phoneNow, phoneTime, type Quat } from "../orientation";
 
@@ -510,7 +510,7 @@ async function upload(url: string, blob: Blob, onProgress: (f: number) => void):
   let failures = 0;
   while (size < blob.size) {
     try {
-      const res = await fetch(`${url}?offset=${size}`, { method: "PUT", body: blob.slice(size, size + CHUNK), credentials: "same-origin" });
+      const res = await fetch(withTree(`${url}?offset=${size}`), { method: "PUT", body: blob.slice(size, size + CHUNK), credentials: "same-origin" });
       if (res.status === 409) {
         size = (await api<{ size: number }>(url)).size; // resume from what the server has
         continue;
