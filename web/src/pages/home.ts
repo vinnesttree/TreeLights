@@ -28,8 +28,12 @@ export function homePage(): Page {
         h("div", { class: "card" }, h("h2", {}, "Status"), status),
       );
       api("/api/state").then((s) => {
+        const ctl: any[] = s.controllers ?? [];
         status.replaceChildren(
-          h("div", {}, `Controller: ${s.wled.host ?? "not selected"}${s.wled.version ? ` (WLED ${s.wled.version})` : ""}`),
+          s.trees?.length > 1 ? h("div", {}, h("b", {}, s.tree.name), ` (one of ${s.trees.length} trees; choose at the top)`) : "",
+          ctl.length > 1
+            ? h("div", {}, `Controllers: ${ctl.map((c, k) => `${k + 1}. ${c.host ?? "not selected"} (LEDs ${c.start}–${c.start + c.count - 1})`).join(", ")}`)
+            : h("div", {}, `Controller: ${s.wled.host ?? "not selected"}${s.wled.version ? ` (WLED ${s.wled.version})` : ""}`),
           h("div", {}, `LEDs: ${s.led_count}`),
           h("div", {}, `Tree height: ${s.tree_height_cm ? s.tree_height_cm + " cm" : "not set"}`),
           h("div", {}, `Active map: ${s.active_map ?? "none yet"}`),

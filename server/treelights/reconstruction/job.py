@@ -42,6 +42,7 @@ def run_solve(scan_root: str, tree_height_cm: float | None, prev_map: dict | Non
         n=scan.meta["led_count"], obs=obs, segments=segs, tree_height_cm=tree_height_cm,
         output_breaks=list(scan.meta.get("output_breaks", [])), overrides=scan.overrides(),
         prev_map=prev_map, f0_prior=f0_prior, scan_id=scan.id, wled=wled,
+        controller_breaks=list(scan.meta.get("controller_breaks", [])),
     )
     m = solve(inp, progress=solve_report(report))
     if walk["segments"]:

@@ -34,7 +34,10 @@ class WledFaults:
 class VirtualWled:
     TIMEOUT_S = 2.5
 
-    def __init__(self, n: int = 600, buses: list[tuple[int, int]] | None = None, seed: int = 0, max_ma: int = 15000):
+    def __init__(self, n: int = 600, buses: list[tuple[int, int]] | None = None, seed: int = 0, max_ma: int = 15000,
+                 mac: str = "02:00:00:00:00:01", name: str = "Virtual WLED"):
+        self.mac = mac
+        self.name = name
         self.n = n
         self.buses = buses or [(0, n)]
         self.faults = WledFaults()
@@ -136,7 +139,7 @@ class VirtualWled:
     # ---- HTTP -----------------------------------------------------------
     def info(self) -> dict:
         return {
-            "ver": "0.15.0", "name": "Virtual WLED", "mac": "02:00:00:00:00:01",
+            "ver": "0.15.0", "name": self.name, "mac": self.mac,
             "leds": {"count": self.n, "maxpwr": self.max_ma, "pwr": 0, "fps": 40},
             "live": self.live, "lip": self.live_ip if self.live else "", "lm": "DDP" if self.live else "",
             "uptime": int(time.monotonic() - self.boot),
@@ -182,6 +185,52 @@ class VirtualWled:
         if self._server:
             self._server.should_exit = True
             await self._server_task
+
+
+class VirtualWledGroup:
+    """Several virtual controllers driving one tree, in index order (architecture §5.5):
+    controller k shows the tree's LEDs offsets[k] .. offsets[k] + counts[k] - 1. Each
+    has its own UDP and HTTP port, MAC, power limit and network delay, so a delay that
+    differs between controllers (timing skew) can be simulated. To the virtual camera the
+    group is one string: `state_at` joins what every controller shows."""
+
+    def __init__(self, counts: list[int], seed: int = 0, delays_ms: list[tuple[float, float]] | None = None,
+                 buses: list[list[tuple[int, int]] | None] | None = None, max_ma: int = 15000, mac_base: int = 0x10):
+        self.counts = [int(c) for c in counts]
+        self.offsets = [int(sum(self.counts[:k])) for k in range(len(self.counts))]
+        self.n = int(sum(self.counts))
+        self.controllers = [
+            VirtualWled(c, buses=(buses[k] if buses else None), seed=seed + 101 * k, max_ma=max_ma,
+                        mac=f"02:00:00:00:{mac_base:02x}:{k + 1:02x}", name=f"Virtual WLED {k + 1}")
+            for k, c in enumerate(self.counts)]
+        for k, w in enumerate(self.controllers):
+            if delays_ms and delays_ms[k] is not None:
+                w.faults.delay_ms = tuple(delays_ms[k])
+
+    def __iter__(self):  # noqa: ANN204
+        return iter(self.controllers)
+
+    def __getitem__(self, k: int) -> VirtualWled:
+        return self.controllers[k]
+
+    def __len__(self) -> int:
+        return len(self.controllers)
+
+    def state_at(self, t: float) -> np.ndarray:
+        return np.concatenate([w.state_at(t) for w in self.controllers], axis=0)
+
+    def settings(self, host: str = "127.0.0.1") -> list[dict]:
+        """The tree's controllers as `PUT /api/controllers` takes them."""
+        return [{"host": host, "http_port": w.http_port, "udp_port": w.udp_port, "led_count": w.n}
+                for w in self.controllers]
+
+    async def start(self) -> None:
+        for w in self.controllers:
+            await w.start()
+
+    async def stop(self) -> None:
+        for w in self.controllers:
+            await w.stop()
 
 
 class _Proto(asyncio.DatagramProtocol):

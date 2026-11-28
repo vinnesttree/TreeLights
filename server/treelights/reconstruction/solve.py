@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.spatial import cKDTree
@@ -35,6 +35,8 @@ class SolveInput:
     f0_prior: float | None = None
     scan_id: str = ""
     wled: dict | None = None
+    # Breaks between WLED controllers (also in output_breaks); only labelled differently.
+    controller_breaks: list[int] = field(default_factory=list)
 
 
 COINCIDENT_FRAC = 0.2  # of the typical LED spacing: closer than this, two LEDs can't both be there
@@ -202,7 +204,8 @@ def solve(inp: SolveInput, progress=lambda msg: None) -> dict:
         learn_pos.update(sel_pos)
         learn_sigma = {i: h.sigma for i, h in strong_best.items()}
         learn_sigma.update(sigma)
-        bounds = chain.learn_bounds(n, learn_pos, learn_sigma, trusted | set(strong_best), H_world, inp.output_breaks, user)
+        bounds = chain.learn_bounds(n, learn_pos, learn_sigma, trusted | set(strong_best), H_world, inp.output_breaks, user,
+                                    controller_breaks=inp.controller_breaks)
         nodes = {i: [chain.Node(h.X, h.sigma, h.cost) for h in lst] for i, lst in hyps.items()}
         selected = chain.select_chain(n, nodes, bounds)
         sel_pos = {i: hyps[i][k].X for i, k in selected.items()}

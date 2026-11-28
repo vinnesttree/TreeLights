@@ -82,8 +82,18 @@ class UdpFrameSender:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.packets_sent = 0
 
+    def encode(self, rgb: np.ndarray) -> list[bytes]:
+        return encode_frame(rgb) if self.protocol == "ddp" else encode_dnrgb(rgb)
+
+    def send_raw(self, packet: bytes) -> None:
+        try:
+            self.sock.sendto(packet, (self.host, self.port))
+            self.packets_sent += 1
+        except OSError:
+            pass  # network errors surface through the monitor
+
     def send(self, rgb: np.ndarray, repeats: int = 1, gap_s: float = 0.002) -> None:
-        packets = encode_frame(rgb) if self.protocol == "ddp" else encode_dnrgb(rgb)
+        packets = self.encode(rgb)
         for r in range(repeats):
             if r:
                 time.sleep(gap_s)
@@ -92,11 +102,7 @@ class UdpFrameSender:
                     # Give the earlier packets a head start so the PUSH packet
                     # is unlikely to overtake them.
                     time.sleep(0.0005)
-                try:
-                    self.sock.sendto(p, (self.host, self.port))
-                    self.packets_sent += 1
-                except OSError:
-                    pass  # network errors surface through the monitor
+                self.send_raw(p)
 
     def close(self) -> None:
         self.sock.close()

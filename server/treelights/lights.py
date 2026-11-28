@@ -23,7 +23,7 @@ from . import storage
 from .effects import LIBRARY, PALETTE_IDS, Params
 
 if TYPE_CHECKING:
-    from .app import AppState
+    from .tree import Tree
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ def _detail(e: Exception) -> str:
 class Lights:
     FILE = "lights.json"
 
-    def __init__(self, app: "AppState"):
+    def __init__(self, app: "Tree"):
         self.app = app
         self.path = Path(app.data_dir) / self.FILE
         saved = storage.read_json(self.path, default=None) or {}
@@ -178,24 +178,25 @@ class Lights:
         return self.status()
 
     async def _wled_power(self, on: bool) -> None:
-        """Turn WLED itself on or off. Not being able to is reported, not raised: the
-        effect runs (or has stopped) either way."""
-        link = self.app.link
-        if not link.host:
-            return
-        try:
-            if on:
-                # WLED shows realtime data even while off, but its own "on" keeps the UI and
-                # other integrations consistent with what the tree shows.
-                st = await link.client.state()
-                if st.get("on") is False:
-                    await link.client.set_state({"on": True})
-            else:
-                await link.client.set_state({"on": False})
-            self.error = None
-        except Exception as e:  # noqa: BLE001
-            self.error = f"Couldn't turn WLED {'on' if on else 'off'} at {link.host}: {e}"
-            log.warning("%s", self.error)
+        """Turn WLED itself on or off, on every controller of the tree. Not being able to
+        is reported, not raised: the effect runs (or has stopped) either way."""
+        errors = []
+        for link in self.app.links:
+            if not link.host:
+                continue
+            try:
+                if on:
+                    # WLED shows realtime data even while off, but its own "on" keeps the UI and
+                    # other integrations consistent with what the tree shows.
+                    st = await link.client.state()
+                    if st.get("on") is False:
+                        await link.client.set_state({"on": True})
+                else:
+                    await link.client.set_state({"on": False})
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"Couldn't turn WLED {'on' if on else 'off'} at {link.host}: {e}")
+                log.warning("%s", errors[-1])
+        self.error = " ".join(errors) or None
 
     # ---- lifecycle ---------------------------------------------------------------------------
     async def restore(self) -> None:

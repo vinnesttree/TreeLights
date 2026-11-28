@@ -114,6 +114,31 @@ docker compose -f docker/docker-compose.yml -f docker/build.yml up -d --build
 - **LED count:** set it to match the string. The Setup page compares it with TreeLights' setting.
 - **Color order and outputs:** TreeLights checks the color order with the camera and compensates. It reads the GPIO outputs from WLED and treats output boundaries as breaks in the chain.
 
+## Several controllers or several trees
+
+*Tested in the simulator only. The only real-hardware test so far was one controller, one output and 600 LEDs.*
+
+**One tree on several controllers** (for example 1200 LEDs, 600 on each of two ESP32s):
+1. On **Setup**, under *WLED controllers of this tree*, choose the first controller with *Use*, then *Add* the others (from *Find controllers* or by address).
+2. Put them in wiring order with the arrows and check each one's LED count, then *Save controllers*. The LEDs are numbered across the controllers in that order: controller 1 has LEDs 0–599, controller 2 has 600–1199.
+3. *Run checks*: every controller is checked. *Index chase* runs across all of them in order.
+4. Scan as usual. All controllers blink together, and the result is one map. There's no wire between controllers, so the map treats each boundary as a break in the chain.
+
+- **Each controller** needs *Receive UDP realtime* on, like a single one.
+- **The power cap** applies to each controller separately: its own limit in WLED, or the limit set on Setup for each controller.
+- **WiFi.** The controllers should all have a good signal. If one gets its packets much later than the others (more than about 40 ms), the walk-around scan can miss its LEDs; the map then warns that that controller's LEDs were mostly not placed.
+
+**Several trees** (each with its own controllers):
+1. On **Setup**, under *Trees*, *Add a tree* and name it. A menu at the top of every page now chooses the tree the page acts on.
+2. With that tree chosen, set up its controllers, height and checks, then scan it.
+- Each tree has its own maps, effect, brightness, on/off, timers and Home Assistant light (its own MQTT topic; the broker is shared).
+- Scanning one tree doesn't stop the effect on another.
+- A controller can belong to one tree only.
+- On the phone, open the Scan page with the tree in the link, `https://<host>:8443/#/scan?tree=tree2`, or choose it in the menu.
+- The API takes the tree as `?tree=<id>` (or `/api/trees/<id>/...`); without it, it acts on the first tree, as before.
+
+**Upgrading** from a version with one tree needs nothing: at the first start, the existing settings, scans and maps become the first tree (the old `config.json` is kept as `config.v1.json`).
+
 ## Mapping the tree
 
 1. **Setup.**
@@ -195,7 +220,7 @@ The **Schedule** page switches the tree on and off.
 - **Palette** (select), **Speed** and **Intensity** (numbers);
 - **Schedule** (a switch that pauses the timers) and **Next timer** (a timestamp sensor).
 
-Topics are `treelights/...` (availability `treelights/status`). Give a second tree its own topic on the Setup page. Turning the integration off removes the device from Home Assistant. Don't control the tree with Home Assistant's own WLED integration at the same time: TreeLights is what sends the frames.
+Topics are `treelights/...` (availability `treelights/status`). Each tree is its own device with its own topic (`treelights_tree2/...` for a second tree, changeable on the Setup page). Turning the integration off removes the device from Home Assistant. Don't control the tree with Home Assistant's own WLED integration at the same time: TreeLights is what sends the frames.
 
 **API:**
 - `GET`/`POST /api/lights`, for example `{"on": true, "effect": "twinkle", "brightness": 0.6}` or `{"on": false}`.
@@ -252,7 +277,8 @@ PYTHONPATH=. ../.venv/bin/python tools/walk_report.py noisy 150 50   # walk-arou
 Layout:
 
 - `server/treelights/`
-  - `wled/`: DDP, JSON API, discovery, monitor
+  - `wled/`: DDP, JSON API, discovery, monitor, several controllers per tree (`group.py`)
+  - `tree.py`, `config.py`: trees, their controllers and settings, upgrade from one tree
   - `output/`: lease and keepalive thread
   - `lights.py`, `schedule.py`, `sun.py`, `homeassistant.py`: on/off, timers, sunrise/sunset, Home Assistant over MQTT
   - `drawing.py`: drawing from the phone (the brush is in `effects/drawing.py`)

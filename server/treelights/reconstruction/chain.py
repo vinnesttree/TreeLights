@@ -41,11 +41,13 @@ class Bounds:
 
 
 def learn_bounds(n: int, pos: dict[int, np.ndarray], sigma: dict[int, float], trusted: set[int], height: float,
-                 output_breaks: list[int] = (), user: dict | None = None) -> Bounds:
+                 output_breaks: list[int] = (), user: dict | None = None, controller_breaks: list[int] = ()) -> Bounds:
     """pos/sigma: current best positions; trusted: LEDs measured confidently.
-    user: {"breaks": [i...], "links": {i: bound_world_units}, "cap": world_units|None}"""
+    user: {"breaks": [i...], "links": {i: bound_world_units}, "cap": world_units|None}
+    controller_breaks: boundaries between WLED controllers (no physical link, like
+    output_breaks; labelled "break_controller")."""
     user = user or {}
-    known_break = set(output_breaks) | {int(i) for i in user.get("breaks", [])}
+    known_break = set(output_breaks) | set(controller_breaks) | {int(i) for i in user.get("breaks", [])}
     d_tr = {i: float(np.linalg.norm(pos[i + 1] - pos[i])) for i in range(n - 1)
             if i in trusted and i + 1 in trusted and i not in known_break}
     notes = []
@@ -97,7 +99,8 @@ def learn_bounds(n: int, pos: dict[int, np.ndarray], sigma: dict[int, float], tr
     for i in known_break:
         if 0 <= i < n - 1:
             bound[i] = np.inf
-            kind[i] = "break_output" if i in output_breaks else "break_user"
+            kind[i] = ("break_controller" if i in controller_breaks else
+                       "break_output" if i in output_breaks else "break_user")
     for i, b in (user.get("links") or {}).items():
         i = int(i)
         if 0 <= i < n - 1 and i not in known_break:

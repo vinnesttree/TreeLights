@@ -21,36 +21,64 @@ import websockets
 from .scene import Faults, Scene
 from .tree import make_tree
 from .virtual_phone import VirtualPhone
-from .virtual_wled import VirtualWled
+from .virtual_wled import VirtualWled, VirtualWledGroup
 
 log = logging.getLogger(__name__)
 
 
 async def run_rig(server: str, n: int = 600, views: int = 8, mode: str = "hybrid", seed: int = 0,
                   faults: Faults | None = None, drop_prob: float = 0.0, solve: bool = True, verbose: bool = True,
-                  output_break_at: int | None = None) -> dict:
-    tree = make_tree(n=n, seed=seed, output_break_at=output_break_at)
+                  output_break_at: int | None = None, controllers: list[int] | None = None,
+                  delays_ms: list[tuple[float, float]] | None = None, tree_id: str | None = None,
+                  tree_kw: dict | None = None) -> dict:
+    """controllers: the LEDs split over several virtual WLED controllers with these LED
+    counts (in index order), each with its own network delay (delays_ms[k], ms), as one
+    tree. tree_id: the server's tree to scan (default: its default tree)."""
+    if controllers and sum(controllers) != n:
+        raise ValueError("the controllers' LED counts must add up to n")
+    starts = [sum(controllers[:j]) for j in range(1, len(controllers))] if controllers else None
+    tree = make_tree(n=n, seed=seed, output_break_at=output_break_at, breaks_at=starts, **(tree_kw or {}))
     scene = Scene(tree, seed=seed, faults=faults or Faults())
-    buses = [(0, output_break_at), (output_break_at, n - output_break_at)] if output_break_at else [(0, n)]
-    wled = VirtualWled(n, buses=buses, seed=seed)
-    wled.faults.drop_prob = drop_prob
+    if n < 600 and tree_kw:
+        # A smaller tree: bring the camera closer so it fills a similar part of the image.
+        k = (n / 600) ** 0.5
+        scene.eye = scene.eye * np.array([1, k, k])
+        scene.target = scene.target * k
+        scene.__post_init__()
+    if controllers:
+        wled = VirtualWledGroup(controllers, seed=seed, delays_ms=delays_ms)
+        for w in wled:
+            w.faults.drop_prob = drop_prob
+    else:
+        buses = [(0, output_break_at), (output_break_at, n - output_break_at)] if output_break_at else [(0, n)]
+        wled = VirtualWled(n, buses=buses, seed=seed)
+        wled.faults.drop_prob = drop_prob
+        if delays_ms:
+            wled.faults.delay_ms = tuple(delays_ms[0])
     await wled.start()
     sslctx = ssl.create_default_context()
     sslctx.check_hostname = False
     sslctx.verify_mode = ssl.CERT_NONE  # the simulator talks to a local self-signed server
     ws_base = server.replace("https://", "wss://").replace("http://", "ws://")
     wss_ssl = sslctx if ws_base.startswith("wss://") else None
-    async with httpx.AsyncClient(base_url=server, verify=False, timeout=30) as http:
-        await http.put("/api/config", json={"wled": {"host": "127.0.0.1", "http_port": wled.http_port,
-                                                      "udp_port": wled.udp_port, "led_count": n}})
-        r = await http.post("/api/wled/select", json={"host": "127.0.0.1"})
-        r.raise_for_status()
+    params = {"tree": tree_id} if tree_id else None
+    ws_query = f"?tree={tree_id}" if tree_id else ""
+    async with httpx.AsyncClient(base_url=server, verify=False, timeout=30, params=params) as http:
+        checks = None
+        if controllers:
+            (await http.put("/api/controllers", json=wled.settings())).raise_for_status()
+            checks = (await http.get("/api/wled/checks")).json()
+        else:
+            await http.put("/api/config", json={"wled": {"host": "127.0.0.1", "http_port": wled.http_port,
+                                                          "udp_port": wled.udp_port, "led_count": n}})
+            r = await http.post("/api/wled/select", json={"host": "127.0.0.1"})
+            r.raise_for_status()
         span = float(np.ptp(tree.positions[:, 1]))
         await http.put("/api/config", json={"tree_height_cm": round(span, 2)})
         scan = (await http.post("/api/scans")).json()["scan"]
         phone = VirtualPhone(scene, wled, latency_ms=60, seed=seed)
-        async with websockets.connect(f"{ws_base}/ws/capture", ssl=wss_ssl, max_size=None) as cam, \
-                websockets.connect(f"{ws_base}/ws/control", ssl=wss_ssl, max_size=None) as ctl:
+        async with websockets.connect(f"{ws_base}/ws/capture{ws_query}", ssl=wss_ssl, max_size=None) as cam, \
+                websockets.connect(f"{ws_base}/ws/control{ws_query}", ssl=wss_ssl, max_size=None) as ctl:
             async def send_text(m: dict) -> None:
                 await cam.send(json.dumps(m))
 
@@ -99,7 +127,8 @@ async def run_rig(server: str, n: int = 600, views: int = 8, mode: str = "hybrid
                 pass
             phone.stop()
             cam_task.cancel()
-        result = {"scan": scan, "statuses": statuses, "guidance": guidance, "tree": tree, "scene": scene}
+        result = {"scan": scan, "statuses": statuses, "guidance": guidance, "tree": tree, "scene": scene,
+                  "checks": checks}
         if solve:
             job = (await http.post(f"/api/scans/{scan}/solve")).json()
             while job["status"] == "running":

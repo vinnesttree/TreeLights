@@ -6,8 +6,44 @@ export class ApiError extends Error {
   }
 }
 
+// Several trees: every page acts on the tree chosen in the header (kept per browser), or
+// the one named by `tree=` in the page address (#/scan?tree=tree2, e.g. for a phone).
+// The server takes it as a query parameter on every tree-scoped route.
+const TREE_KEY = "tl_tree";
+
+export function currentTree(): string | null {
+  const m = location.hash.match(/[?&]tree=([A-Za-z0-9_-]{1,32})/);
+  if (m) {
+    setCurrentTree(m[1]);
+    return m[1];
+  }
+  try {
+    return localStorage.getItem(TREE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setCurrentTree(id: string | null): void {
+  try {
+    if (id) localStorage.setItem(TREE_KEY, id);
+    else localStorage.removeItem(TREE_KEY);
+  } catch {
+    /* storage blocked: the default tree */
+  }
+}
+
+/** The path with the current tree added (for /api/ and /ws/ paths that act on a tree). */
+export function withTree(path: string): string {
+  const t = currentTree();
+  if (!t || !/^\/(api|ws)\//.test(path) || /^\/api\/(trees|auth|health|camcal)(\/|\?|$)/.test(path) || /[?&]tree=/.test(path)) {
+    return path;
+  }
+  return `${path}${path.includes("?") ? "&" : "?"}tree=${encodeURIComponent(t)}`;
+}
+
 export async function api<T = any>(path: string, opts: { method?: string; body?: unknown } = {}): Promise<T> {
-  const res = await fetch(path, {
+  const res = await fetch(withTree(path), {
     method: opts.method ?? (opts.body !== undefined ? "POST" : "GET"),
     headers: opts.body !== undefined ? { "Content-Type": "application/json" } : undefined,
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
@@ -28,6 +64,10 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
     } catch {
       /* not JSON */
     }
+    if (res.status === 404 && msg.startsWith("no tree") && currentTree()) {
+      setCurrentTree(null); // the tree was removed: back to the first tree
+      return api<T>(path, opts);
+    }
     throw new ApiError(res.status, msg);
   }
   const ct = res.headers.get("content-type") ?? "";
@@ -36,7 +76,7 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
 
 export function wsUrl(path: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${location.host}${path}`;
+  return `${proto}//${location.host}${withTree(path)}`;
 }
 
 /** A WebSocket that reconnects with backoff. */
